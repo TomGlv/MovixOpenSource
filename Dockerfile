@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.19
 
 # ==============================================================
 # Stage 1 — Builder : install all deps + Vite production build
@@ -74,7 +74,9 @@ ENV VITE_MAIN_API=$VITE_MAIN_API \
     GLITCHTIP_PROJECT=$GLITCHTIP_PROJECT \
     COMMIT_REF=$COMMIT_REF
 
-COPY . .
+# Les avatars sont servis tels quels : ils rejoignent uniquement l'image finale.
+# Un changement de ces images ne doit pas invalider la compilation Vite.
+COPY --exclude=public/avatars --exclude=public/avatars/** . .
 
 # `glitchtip_auth_token` est facultatif. S'il est fourni comme secret BuildKit,
 # il n'est enregistré ni dans l'historique ni dans les variables de l'image.
@@ -106,7 +108,8 @@ ENV NODE_ENV=production \
     PORT=3001
 
 COPY --from=production-dependencies --chown=node:node /app/node_modules ./node_modules
-COPY --from=builder --chown=node:node /app/dist ./dist
+# UID/GID de l'utilisateur node dans l'image officielle, sans résolution de nom.
+COPY --link --from=builder --chown=1000:1000 /app/dist ./dist
 # Conserve `type: module` pour le helper ESM situé hors du workspace server.
 COPY --from=builder --chown=node:node /app/package.json ./package.json
 COPY --from=builder --chown=node:node /app/server/package.json ./server/package.json
@@ -114,9 +117,13 @@ COPY --from=builder --chown=node:node /app/server/index.js ./server/index.js
 COPY --from=builder --chown=node:node /app/server/gracefulShutdown.js ./server/gracefulShutdown.js
 COPY --from=builder --chown=node:node /app/functions/_lib/socialPreview.js ./functions/_lib/socialPreview.js
 
+# Couche indépendante du JavaScript, réutilisable quand il change : les avatars
+# restent à /avatars/ sans être dupliqués dans dist pendant la compilation.
+COPY --link --chown=1000:1000 public/avatars/ ./dist/avatars/
+
 EXPOSE 3001
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=2s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --start-interval=1s --retries=3 \
     CMD wget -qO- http://127.0.0.1:${PORT}/health || exit 1
 
 USER node
