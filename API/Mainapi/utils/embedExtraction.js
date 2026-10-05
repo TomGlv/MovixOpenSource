@@ -419,7 +419,16 @@ async function extractPlayerList(players, options = {}) {
  * @returns {Promise<Object<string,string>>}
  */
 async function buildM3u8Map(urls, options = {}) {
-    if (!Array.isArray(urls) || !extractionAvailable()) return {};
+    const { m3u8ByPlayer } = await buildResolvedMaps(urls, options);
+    return m3u8ByPlayer;
+}
+
+/**
+ * Comme `buildM3u8Map`, plus `subtitlesByPlayer` : les sous-titres du lecteur
+ * hébergeur (Uqload) par lien, quand l'extracteur en a trouvé.
+ */
+async function buildResolvedMaps(urls, options = {}) {
+    if (!Array.isArray(urls) || !extractionAvailable()) return { m3u8ByPlayer: {}, subtitlesByPlayer: {} };
 
     const { accessKey, concurrency = DEFAULT_CONCURRENCY } = options;
     const cibles = [...new Set(urls.filter((url) => typeof url === 'string' && detectHoster(url)))];
@@ -428,11 +437,14 @@ async function buildM3u8Map(urls, options = {}) {
         extractEmbed(url, accessKey)
     );
 
-    const table = {};
+    const m3u8ByPlayer = {};
+    const subtitlesByPlayer = {};
     resolus.forEach((resolu, index) => {
-        if (resolu) table[cibles[index]] = resolu.m3u8Url;
+        if (!resolu) return;
+        m3u8ByPlayer[cibles[index]] = resolu.m3u8Url;
+        if (resolu.subtitles) subtitlesByPlayer[cibles[index]] = resolu.subtitles;
     });
-    return table;
+    return { m3u8ByPlayer, subtitlesByPlayer };
 }
 
 function extractionSummary(attempted, resolved) {
@@ -619,6 +631,7 @@ module.exports = {
     extractLanguageMap,
     extractPlayerList,
     buildM3u8Map,
+    buildResolvedMaps,
     extractEpisodeSources,
     extractMovieSources,
     respondWithResolvedSources,

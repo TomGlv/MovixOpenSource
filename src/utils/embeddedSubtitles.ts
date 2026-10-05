@@ -27,6 +27,9 @@ const MAX_REGISTERED_MEDIA = 50;
 
 // Clé : URL média renvoyée par l'extraction, qui devient le `src` du lecteur.
 const registry = new Map<string, EmbeddedSubtitleTrack[]>();
+// Texte déjà téléchargé par l'extension, par id de piste. Pas de blob URL :
+// une nouvelle extraction de la même source le révoquerait sous le lecteur.
+const contents = new Map<string, string>();
 
 function isHttpsUrl(value: unknown): value is string {
   if (typeof value !== 'string') return false;
@@ -66,9 +69,7 @@ export function sanitizeEmbeddedSubtitles(raw: unknown): EmbeddedSubtitle[] {
 }
 
 function releaseTracks(tracks: EmbeddedSubtitleTrack[] | undefined): void {
-  tracks?.forEach((track) => {
-    if (track.url.startsWith('blob:')) URL.revokeObjectURL(track.url);
-  });
+  tracks?.forEach((track) => contents.delete(track.id));
 }
 
 export function registerEmbeddedSubtitles(mediaUrl: string | undefined, provider: string, raw: unknown): void {
@@ -83,10 +84,7 @@ export function registerEmbeddedSubtitles(mediaUrl: string | undefined, provider
     source,
     lang: subtitle.lang,
     label: subtitle.label,
-    // Texte déjà en main : un blob évite le fetch cross-origin au chargement.
-    url: subtitle.content
-      ? URL.createObjectURL(new Blob([subtitle.content], { type: 'text/plain' }))
-      : subtitle.url,
+    url: subtitle.url,
     format: subtitle.format,
     encoding: 'plain',
     isDefault: Boolean(subtitle.default),
@@ -95,11 +93,20 @@ export function registerEmbeddedSubtitles(mediaUrl: string | undefined, provider
   releaseTracks(registry.get(mediaUrl));
   registry.delete(mediaUrl);
   registry.set(mediaUrl, tracks);
+  tracks.forEach((track, index) => {
+    const content = subtitles[index].content;
+    if (content) contents.set(track.id, content);
+  });
   while (registry.size > MAX_REGISTERED_MEDIA) {
     const oldest = registry.keys().next().value as string;
     releaseTracks(registry.get(oldest));
     registry.delete(oldest);
   }
+}
+
+/** Texte déjà téléchargé pour cette piste, si l'extension l'a fourni. */
+export function getEmbeddedSubtitleContent(trackId: string): string | undefined {
+  return contents.get(trackId);
 }
 
 export function getEmbeddedSubtitleTracks(mediaUrl: string | undefined): EmbeddedSubtitleTrack[] {

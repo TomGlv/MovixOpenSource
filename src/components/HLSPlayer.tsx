@@ -189,7 +189,7 @@ import {
 } from '../utils/subtitleDelivery';
 import { useExternalSubtitles } from '../hooks/useExternalSubtitles.ts';
 import type { SubtitleTrack } from '../services/subtitles/index.ts';
-import { getEmbeddedSubtitleTracks } from '../utils/embeddedSubtitles.ts';
+import { getEmbeddedSubtitleContent, getEmbeddedSubtitleTracks } from '../utils/embeddedSubtitles.ts';
 import type {
   KisskhFallbackTransport,
   KisskhSource,
@@ -1708,7 +1708,8 @@ const HLSPlayer = forwardRef<HLSPlayerRef, HLSPlayerProps>(({
     loading: externalLoading,
     providerErrors: externalProviderErrors,
   } = useExternalSubtitles(externalQuery, preferredSubtitleLang);
-  // Pistes fournies par le lecteur de l'hébergeur (Uqload), listées en tête.
+  // Pistes fournies par le lecteur de l'hébergeur (Uqload) : ajoutées plus
+  // bas comme sous-titres intégrés, et aussi listées en tête des externes.
   const embeddedSubtitleTracks = useMemo(() => getEmbeddedSubtitleTracks(src), [src]);
   const subtitleTracks = useMemo(
     () => (embeddedSubtitleTracks.length ? [...embeddedSubtitleTracks, ...externalTracks] : externalTracks),
@@ -4956,6 +4957,21 @@ const HLSPlayer = forwardRef<HLSPlayerRef, HLSPlayerProps>(({
   // Load selected external subtitle into the video by creating a <track> element
   const loadExternalSubtitle = async (sub: SubtitleTrack) => {
     if (!videoRef.current || !sub) return;
+    // Piste Uqload déjà présente dans les sous-titres intégrés : on la
+    // sélectionne au lieu d'en ajouter un doublon.
+    const embeddedIndex = embeddedSubtitleTracks.findIndex((track) => track.id === sub.id);
+    if (embeddedIndex >= 0) {
+      const embeddedEls = Array.from(
+        videoRef.current.querySelectorAll('track[data-embedded="1"]'),
+      ) as HTMLTrackElement[];
+      const textTrack = embeddedEls[embeddedIndex]?.track;
+      const index = textTrack ? Array.from(videoRef.current.textTracks).indexOf(textTrack) : -1;
+      if (index >= 0) {
+        handleSubtitleChange(`internal:${index}`);
+        setSelectedExternalSub(sub);
+        return;
+      }
+    }
     setLoadingSubtitle(true);
     try {
       const video = videoRef.current;
@@ -4975,16 +4991,23 @@ const HLSPlayer = forwardRef<HLSPlayerRef, HLSPlayerProps>(({
       trackEl.srclang = sub.lang || 'und';
       trackEl.setAttribute('data-external', '1');
 
+      // Piste du lecteur hébergeur (Uqload) : l'extension a déjà fourni le texte.
+      const embeddedContent = getEmbeddedSubtitleContent(sub.id);
       // Le registre de providers garantit une URL non vide sur chaque piste.
       const downloadLink = sub.url;
-      if (downloadLink) {
+      if (embeddedContent) {
+        trackEl.src = URL.createObjectURL(
+          new Blob([subtitleTextToWebVtt(embeddedContent)], { type: 'text/vtt' }),
+        );
+      } else if (downloadLink) {
         try {
           // Download and extract the .gz file locally using PAKO
-          const response = await fetch(downloadLink, {
-            headers: {
-              'User-Agent': 'Movix/1.0'
-            }
-          });
+          // Uqload sert ses VTT en CORS simple : un en-tête ajouté forcerait
+          // une requête OPTIONS que son serveur ne gère pas.
+          const response = await fetch(
+            downloadLink,
+            sub.provider === 'uqload' ? undefined : { headers: { 'User-Agent': 'Movix/1.0' } },
+          );
 
           if (!response.ok) {
             throw new Error(`Download failed: ${response.status}`);
@@ -5127,27 +5150,72 @@ const HLSPlayer = forwardRef<HLSPlayerRef, HLSPlayerProps>(({
     }
   };
 
-  // Uqload marque une piste « default » (souvent le français) : on l'active
-  // comme son propre lecteur, une fois par source et sans écraser un choix.
-  const autoLoadedEmbeddedSrcRef = useRef<string | null>(null);
+  // Pistes du lecteur Uqload : toutes ajoutées comme sous-titres intégrés,
+  // comme sur Uqload. La piste « default » (souvent le français) s'active
+  // seule, sans écraser un choix déjà fait.
   useEffect(() => {
-    const preferred = embeddedSubtitleTracks.find((track) => track.isDefault);
     const video = videoRef.current;
-    if (!preferred || !video || autoLoadedEmbeddedSrcRef.current === src) return;
-    const apply = () => {
-      if (currentSubtitleRef.current !== 'off') return;
-      autoLoadedEmbeddedSrcRef.current = src;
-      void loadExternalSubtitle(preferred);
+    if (!video) return;
+    const removeEmbedded = () => {
+      video.querySelectorAll('track[data-embedded="1"]').forEach((node) => {
+        const trackEl = node as HTMLTrackElement;
+        if (trackEl.src.startsWith('blob:')) URL.revokeObjectURL(trackEl.src);
+        trackEl.remove();
+      });
     };
-    if (video.readyState >= 1) {
-      apply();
-      return;
-    }
-    video.addEventListener('loadedmetadata', apply, { once: true });
-    return () => video.removeEventListener('loadedmetadata', apply);
-  // loadExternalSubtitle est recréée à chaque rendu ; seule la source compte.
+    removeEmbedded();
+    if (!embeddedSubtitleTracks.length) return;
+
+    let cancelled = false;
+    const loadText = async (sub: SubtitleTrack): Promise<string | null> => {
+      const content = getEmbeddedSubtitleContent(sub.id);
+      if (content) return content;
+      try {
+        // Sans en-tête ajouté : Uqload répond 405 aux requêtes OPTIONS.
+        const response = await fetch(sub.url);
+        return response.ok ? await response.text() : null;
+      } catch {
+        return null;
+      }
+    };
+
+    const attach = async () => {
+      const texts = await Promise.all(embeddedSubtitleTracks.map(loadText));
+      if (cancelled) return;
+      let defaultTrack: TextTrack | null = null;
+      embeddedSubtitleTracks.forEach((sub, index) => {
+        const trackEl = document.createElement('track');
+        trackEl.kind = 'subtitles';
+        trackEl.label = `${sub.lang} - ${sub.label}`;
+        trackEl.srclang = sub.lang || 'und';
+        trackEl.setAttribute('data-embedded', '1');
+        const text = texts[index];
+        trackEl.src = text
+          ? URL.createObjectURL(new Blob([subtitleTextToWebVtt(text)], { type: 'text/vtt' }))
+          : sub.url;
+        video.appendChild(trackEl);
+        trackEl.track.mode = 'disabled';
+        if (sub.isDefault && !defaultTrack) defaultTrack = trackEl.track;
+      });
+      const tracks = Array.from(video.textTracks);
+      setSubtitles(tracks);
+      if (defaultTrack && currentSubtitleRef.current === 'off') {
+        const index = tracks.indexOf(defaultTrack);
+        if (index >= 0) handleSubtitleChange(`internal:${index}`);
+      }
+    };
+
+    const start = () => { void attach(); };
+    if (video.readyState >= 1) start();
+    else video.addEventListener('loadedmetadata', start, { once: true });
+    return () => {
+      cancelled = true;
+      video.removeEventListener('loadedmetadata', start);
+      removeEmbedded();
+    };
+  // handleSubtitleChange est recréée à chaque rendu ; seule la source compte.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [embeddedSubtitleTracks, src]);
+  }, [embeddedSubtitleTracks]);
 
   // Helper function to detect text encoding from byte array (exact same logic as server.js)
   const detectEncoding = (buffer: Uint8Array): string => {

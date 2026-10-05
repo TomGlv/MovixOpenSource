@@ -67,8 +67,17 @@ export function registerServerResolvedSources(payload: unknown, depth = 0): void
   // une table parallèle « lien -> m3u8 » plutôt que sur l'objet lecteur.
   const byPlayer = record.m3u8ByPlayer;
   if (byPlayer && typeof byPlayer === 'object' && !Array.isArray(byPlayer)) {
+    // Liens communautaires : sous-titres Uqload dans une table parallèle.
+    const subtitlesByPlayer =
+      record.subtitlesByPlayer && typeof record.subtitlesByPlayer === 'object'
+        ? record.subtitlesByPlayer as Record<string, unknown>
+        : {};
     for (const [embed, m3u8] of Object.entries(byPlayer as Record<string, unknown>)) {
-      if (typeof m3u8 === 'string' && m3u8) serverResolvedM3u8.set(embed, m3u8);
+      if (typeof m3u8 !== 'string' || !m3u8) continue;
+      serverResolvedM3u8.set(embed, m3u8);
+      if (Array.isArray(subtitlesByPlayer[embed])) {
+        registerEmbeddedSubtitles(m3u8, 'uqload', subtitlesByPlayer[embed]);
+      }
     }
   }
 
@@ -759,6 +768,13 @@ export async function extractM3u8OnDetection(
     try {
       const extensionResult = await window.movixExtractAllM3u8(sources);
       if (hasCompleteBulkCoverage(detectedEmbeds, extensionResult?.results)) {
+        // Ce chemin groupé ne passe pas par extractUqloadFile : on enregistre
+        // ici les sous-titres Uqload, sinon le lecteur ne les verrait jamais.
+        extensionResult.results.forEach((r: any) => {
+          if (r?.success && r.type === 'uqload' && r.subtitles) {
+            registerEmbeddedSubtitles(r.m3u8Url || r.hlsUrl, 'uqload', r.subtitles);
+          }
+        });
         return extensionResult.results.map((r: any) => ({
           type: r.type || 'unknown',
           url: r.url || '',
