@@ -1,13 +1,13 @@
 {
-  "version": "2.6.2",
-  "buildNumber": 39,
+  "version": "2.6.3",
+  "buildNumber": 40,
   "apkUrl": "https://raw.githubusercontent.com/movixstream/MovixOpenSource/main/app/movix-android.apk",
-  "apkSizeBytes": 72613057,
-  "apkSha256": "617be8e70666bb5804525949f01e27c8c59e4bdcdbecb206c1f0577769e859a0",
+  "apkSizeBytes": 72613245,
+  "apkSha256": "521c38d8230f7d1f349102d3c4bbb6b88ce61b4c1d21603ba209285c635752b8",
   "mandatory": false,
-  "releasedAt": "2026-10-05T15:07:36.000Z",
+  "releasedAt": "2026-10-05T15:55:02.000Z",
   "releaseNotes": {
-    "fr": "Correction de l'extraction Fsvid et Vidzy. Ajout des sous-titres du lecteur Uqload. Correction du changeur de DNS Cloudflare (DNS chiffré, attente du VPN et miroirs de secours). Correction du cast sur certains flux.",
-    "en": "Fixed Fsvid and Vidzy extraction. Added Uqload player subtitles. Fixed the Cloudflare DNS switcher (encrypted DNS, waiting for the VPN and fallback mirrors). Fixed casting on some streams."
+    "fr": "Correction de « Movix injoignable » avec le DNS Cloudflare activé : l'app attend que le DNS soit prêt avant de charger Movix. Correction d'un plantage à la désactivation du DNS.",
+    "en": "Fixed \"Movix unreachable\" with the Cloudflare DNS enabled: the app now waits for the DNS to be ready before loading Movix. Fixed a crash when turning the DNS off."
   }
 }

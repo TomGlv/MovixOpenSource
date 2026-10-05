@@ -4,6 +4,8 @@ import android.content.Intent
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.os.SystemClock
+import android.util.Log
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -45,6 +47,7 @@ class DnsVpnService : VpnService() {
         @Volatile var isActive: Boolean = false
             private set
 
+        private const val TAG = "MovixDns"
         private const val VPN_ADDRESS = "10.215.173.1"
         private const val VIRTUAL_DNS = "10.215.173.2"
 
@@ -105,6 +108,7 @@ class DnsVpnService : VpnService() {
 
             vpnInterface = builder.establish()
 
+            Log.i(TAG, "Tunnel ${if (vpnInterface != null) "monté" else "refusé par Android"} (DNS $primaryDns, $secondaryDns)")
             if (vpnInterface != null) {
                 httpClient = buildHttpClient()
                 workers = Executors.newFixedThreadPool(WORKER_COUNT)
@@ -139,6 +143,9 @@ class DnsVpnService : VpnService() {
                     val length = input.read(buffer)
                     if (length <= 0) continue
 
+                    // Le reste (sondes DNS-over-TLS d'Android vers le port 853,
+                    // paquets IPv6 du noyau) est ignoré : Android repasse alors
+                    // de lui-même au DNS classique.
                     val ipHeaderLength = dnsQueryHeaderLength(buffer, length) ?: continue
                     val packet = buffer.copyOf(length)
                     // Une requête lente ne doit pas bloquer les suivantes : le
@@ -186,17 +193,23 @@ class DnsVpnService : VpnService() {
     private fun resolve(query: ByteArray): ByteArray? {
         val upstreams = listOf(primaryDns, secondaryDns).distinct()
         val dohUrls = upstreams.mapNotNull { DOH_ENDPOINTS[it] }
+        val started = SystemClock.elapsedRealtime()
 
         if (dohUrls.isNotEmpty() && System.currentTimeMillis() >= dohPausedUntil) {
             for (url in dohUrls) {
                 queryDoh(url, query)?.let { return it }
             }
             dohPausedUntil = System.currentTimeMillis() + DOH_PAUSE_MS
+            Log.w(TAG, "DoH en échec : UDP seul pendant ${DOH_PAUSE_MS / 1000} s")
         }
 
         for (server in upstreams) {
-            queryUdp(server, query)?.let { return it }
+            queryUdp(server, query)?.let {
+                Log.d(TAG, "UDP $server ok en ${SystemClock.elapsedRealtime() - started} ms")
+                return it
+            }
         }
+        Log.w(TAG, "Aucune réponse après ${SystemClock.elapsedRealtime() - started} ms")
         return null
     }
 
@@ -207,12 +220,17 @@ class DnsVpnService : VpnService() {
             .header("Accept", "application/dns-message")
             .post(query.toRequestBody(DNS_MESSAGE))
             .build()
+        val started = SystemClock.elapsedRealtime()
         return try {
             client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) return null
+                if (!response.isSuccessful) {
+                    Log.w(TAG, "DoH $url : HTTP ${response.code}")
+                    return null
+                }
                 response.body?.bytes()
             }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.w(TAG, "DoH $url : échec en ${SystemClock.elapsedRealtime() - started} ms (${e.javaClass.simpleName}: ${e.message})")
             null
         }
     }
@@ -228,7 +246,8 @@ class DnsVpnService : VpnService() {
                 socket.receive(responsePacket)
                 responseBuffer.copyOf(responsePacket.length)
             }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.w(TAG, "UDP $server : échec (${e.javaClass.simpleName}: ${e.message})")
             null
         }
     }
@@ -315,6 +334,7 @@ class DnsVpnService : VpnService() {
     }
 
     private fun stopVpn() {
+        if (isRunning) Log.i(TAG, "Tunnel arrêté")
         isRunning = false
         isActive = false
         readerThread?.interrupt()
@@ -322,8 +342,15 @@ class DnsVpnService : VpnService() {
         workers?.shutdownNow()
         workers = null
         httpClient?.let { client ->
-            client.dispatcher.executorService.shutdown()
-            client.connectionPool.evictAll()
+            // Fermer une connexion TLS écrit sur le réseau : interdit sur le
+            // thread principal (NetworkOnMainThreadException faisait planter
+            // l'app à la désactivation du DNS).
+            Thread {
+                try {
+                    client.dispatcher.executorService.shutdown()
+                    client.connectionPool.evictAll()
+                } catch (_: Exception) {}
+            }.start()
         }
         httpClient = null
         try { vpnInterface?.close() } catch (_: Exception) {}

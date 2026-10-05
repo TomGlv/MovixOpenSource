@@ -29,49 +29,72 @@ function waitAtMost<T>(promise: Promise<T>, ms: number): Promise<T | undefined> 
   ]);
 }
 
-function promptDns() {
-  Alert.alert(
-    'DNS Cloudflare 1.1.1.1',
-    'Activer le DNS Cloudflare pour une navigation plus rapide et sécurisée ?\n\n(Recommandé)',
-    [
-      {
-        text: 'Non merci',
-        style: 'cancel',
-        onPress: () => {
-          AsyncStorage.setItem('dns_enabled', 'false');
-        },
-      },
-      {
-        text: 'Activer',
-        style: 'default',
-        onPress: async () => {
-          try {
-            if (!DnsModule) {
-              await AsyncStorage.setItem('dns_enabled', 'false');
-              return;
-            }
+// Au premier lancement, l'accord VPN d'Android peut s'afficher : on laisse le
+// temps de le lire avant de charger Movix quand même.
+const DNS_PROMPT_WAIT_MS = 30000;
 
-            if (Platform.OS === 'ios') {
-              const dnsActivated = await DnsModule.enable('1.1.1.1', '1.0.0.1');
-              await AsyncStorage.setItem('dns_enabled', dnsActivated ? 'true' : 'false');
-              if (!dnsActivated) {
-                Alert.alert(
-                  'Activation DNS requise',
-                  'La configuration est installée. Active-la manuellement dans Réglages > Général > VPN et gestion de l’appareil > DNS.',
-                  [{ text: 'Compris' }],
-                );
-              }
-            } else {
-              await DnsModule.enable('1.1.1.1', '1.0.0.1');
-              await AsyncStorage.setItem('dns_enabled', 'true');
-            }
-          } catch {
-            await AsyncStorage.setItem('dns_enabled', 'false');
-          }
+async function enableDnsFromPrompt(): Promise<void> {
+  try {
+    if (!DnsModule) {
+      await AsyncStorage.setItem('dns_enabled', 'false');
+      return;
+    }
+
+    if (Platform.OS === 'ios') {
+      const dnsActivated = await DnsModule.enable('1.1.1.1', '1.0.0.1');
+      await AsyncStorage.setItem('dns_enabled', dnsActivated ? 'true' : 'false');
+      if (!dnsActivated) {
+        Alert.alert(
+          'Activation DNS requise',
+          'La configuration est installée. Active-la manuellement dans Réglages > Général > VPN et gestion de l’appareil > DNS.',
+          [{ text: 'Compris' }],
+        );
+      }
+      return;
+    }
+
+    // La promesse native ne se résout qu'une fois le tunnel monté. Le choix
+    // est enregistré à la fin de l'activation, même si Movix a déjà été
+    // chargé entre-temps parce que l'attente a dépassé son plafond.
+    const activation = DnsModule.enable('1.1.1.1', '1.0.0.1').then(
+      () => AsyncStorage.setItem('dns_enabled', 'true'),
+      () => AsyncStorage.setItem('dns_enabled', 'false'),
+    );
+    await waitAtMost(activation, DNS_PROMPT_WAIT_MS);
+  } catch {
+    await AsyncStorage.setItem('dns_enabled', 'false');
+  }
+}
+
+// Se résout une fois le choix appliqué (VPN monté compris).
+function promptDns(): Promise<void> {
+  return new Promise(resolve => {
+    Alert.alert(
+      'DNS Cloudflare 1.1.1.1',
+      'Activer le DNS Cloudflare pour une navigation plus rapide et sécurisée ?\n\n(Recommandé)',
+      [
+        {
+          text: 'Non merci',
+          style: 'cancel',
+          onPress: () => {
+            AsyncStorage.setItem('dns_enabled', 'false')
+              .catch(() => {})
+              .finally(resolve);
+          },
         },
-      },
-    ],
-  );
+        {
+          text: 'Activer',
+          style: 'default',
+          onPress: () => {
+            enableDnsFromPrompt().finally(resolve);
+          },
+        },
+      ],
+      // Fermée sans choix (retour, toucher à côté) : rien n'est enregistré,
+      // la question reviendra au prochain lancement.
+      { cancelable: true, onDismiss: () => resolve() },
+    );
+  });
 }
 
 export default function App() {
@@ -115,11 +138,11 @@ export default function App() {
           await AsyncStorage.setItem('dns_enabled', 'false');
           setDnsSettled(true);
         } else if (stored === null) {
-          promptDns();
-          // Mark settled on next tick — we don't block on user's DNS answer.
-          // The update check is cheap and will still run after; its dialog
-          // stacks on top of the DNS prompt on Android without issue now
-          // that it's a proper Modal, not Alert.alert.
+          // Attendre la réponse, et le VPN si l'utilisateur l'active, AVANT
+          // de charger Movix : un VPN monté en plein chargement laissait les
+          // connexions déjà ouvertes bloquées (requêtes qui expirent, images
+          // qui ne chargent pas, puis « Movix injoignable »).
+          await promptDns();
           setDnsSettled(true);
         } else {
           setDnsSettled(true);
