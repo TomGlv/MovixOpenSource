@@ -462,26 +462,44 @@ async function isOriginReachable() {
 }
 
 async function handleNavigation(req) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), NAV_TIMEOUT_MS);
+  // `fetch(req)` SANS second argument, et un délai par course plutôt que par
+  // AbortController. Deux raisons, toutes deux vues sur webOS 5 (Chromium 68) :
+  //  - passer un init (`{ signal }`) avec une requête de mode `navigate` lève
+  //    un TypeError sur les vieux Chromium — chaque navigation échouait alors
+  //    en ERR_FAILED dès que le SW contrôlait la page ;
+  //  - abandonner la requête au bout de 3s transformait une origine lente mais
+  //    joignable (TV, mobile bas de gamme) en page d'erreur. Le délai sert
+  //    seulement à déclencher la sonde ; la requête d'origine continue.
+  const network = fetch(req);
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const err = new Error('navigation timeout');
+      err.name = 'TimeoutError';
+      reject(err);
+    }, NAV_TIMEOUT_MS);
+  });
   try {
-    const res = await fetch(req, { signal: controller.signal });
+    const res = await Promise.race([network, timeout]);
     clearTimeout(timer);
     return res;
   } catch (err) {
     clearTimeout(timer);
     // Si l'utilisateur est offline, on laisse l'erreur réseau naturelle
     if (typeof navigator !== 'undefined' && navigator.onLine === false) {
-      throw err;
+      return network;
     }
     // Confirmation : l'origine est-elle vraiment injoignable ? Sinon (mobile
-    // qui se réveille, network blip, tab throttlé), on relaie l'erreur
-    // d'origine et on laisse le browser gérer (retry naturel, page d'erreur).
-    // On ne bascule au miroir QUE si même un HEAD simple échoue.
+    // qui se réveille, network blip, tab throttlé, appareil lent), on rend la
+    // main à la requête d'origine : sa réponse si elle arrive, son erreur
+    // sinon. On ne bascule au miroir QUE si même un HEAD simple échoue.
     const reachable = await isOriginReachable();
     if (reachable) {
-      throw err;
+      return network;
     }
+    // La requête d'origine peut encore rejeter plus tard : sans handler, le
+    // rejet remonterait en « unhandled rejection ».
+    network.catch(() => {});
     return await redirectToMirror({
       from: self.location.hostname,
       reason: 'unreachable',
