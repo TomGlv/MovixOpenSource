@@ -88,7 +88,24 @@ const observeRouteChanges = (onChange: () => void): void => {
       this: History,
       ...args: Parameters<History['pushState']>
     ) {
-      const result = original.apply(this, args);
+      let result: void;
+      try {
+        result = original.apply(this, args);
+      } catch (error) {
+        // Le script de challenge Cloudflare enveloppe aussi l'History API et
+        // glisse parfois une fonction dans l'état : le navigateur refuse alors
+        // de le cloner et la navigation plantait (GlitchTip 6E, 6F, 6G, 6H,
+        // 6L, 6M). L'état de React Router est du JSON : le rejouer sans ce
+        // qui n'est pas clonable garde la navigation.
+        if ((error as { name?: unknown })?.name !== 'DataCloneError') throw error;
+        let cloneable: unknown = null;
+        try {
+          cloneable = args[0] === undefined ? null : JSON.parse(JSON.stringify(args[0]));
+        } catch {
+          // État circulaire : naviguer sans état plutôt que planter.
+        }
+        result = original.apply(this, [cloneable, args[1], args[2]]);
+      }
       // Micro-tâche : laisse React Router monter la nouvelle route (et donc
       // mettre à jour document.title) avant l'envoi.
       window.setTimeout(notifyIfChanged, 0);

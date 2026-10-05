@@ -12,7 +12,7 @@ const axios = require('axios');
 const path = require('path');
 const fsp = require('fs').promises;
 const { CACHE_DIR, generateCacheKey } = require('../utils/cacheManager');
-const { fetchTmdbDetails, searchTmdb } = require('../utils/tmdbCache');
+const { fetchTmdbDetails, searchTmdb, fetchTmdbImages } = require('../utils/tmdbCache');
 const { acquireRedisLock } = require('../utils/redisLock');
 const { createSourceRefresh } = require('../utils/sourceRefresh');
 const omegaRefresh = createSourceRefresh();
@@ -249,6 +249,41 @@ async function getTMDBDetails(id, type) {
     console.error(`Erreur lors de la recuperation des details TMDB pour ${id} (${type}):`, error);
     return null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// coflixPosterBelongsToOtherShow -- garde-fou contre les homonymes Coflix
+// ---------------------------------------------------------------------------
+// Les fiches series Coflix n'ont pas d'annee : « V » (1984, TMDB 75893) tombait
+// sur la seule fiche « V » de Coflix, le remake de 2009 (TMDB 21494). L'affiche
+// de la carte est une image TMDB : si elle n'appartient pas a la serie demandee
+// mais a un homonyme TMDB, la fiche est rejetee. Sans preuve contraire (pas
+// d'affiche, erreur TMDB, affiche inconnue), on garde le comportement actuel.
+async function coflixPosterBelongsToOtherShow(coflixResult, id, type) {
+  const poster = coflixResult?.poster;
+  if (type !== 'tv' || !poster || coflixResult.year != null) return false;
+
+  const hasPoster = (images) => Array.isArray(images?.posters) &&
+    images.posters.some((p) => p.file_path === poster);
+
+  try {
+    const ownImages = await fetchTmdbImages(TMDB_API_URL, TMDB_API_KEY, id, 'tv');
+    if (hasPoster(ownImages)) return false;
+
+    const search = await searchTmdb(TMDB_API_URL, TMDB_API_KEY, 'tv', coflixResult.title);
+    const homonyms = (search?.results || [])
+      .filter((show) => String(show.id) !== String(id))
+      .slice(0, 5);
+
+    for (const show of homonyms) {
+      if (show.poster_path === poster) return true;
+      const images = await fetchTmdbImages(TMDB_API_URL, TMDB_API_KEY, show.id, 'tv');
+      if (hasPoster(images)) return true;
+    }
+  } catch (error) {
+    console.warn(`[TMDB API] Verification d'affiche Coflix impossible pour ${id}: ${error.message}`);
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -514,14 +549,20 @@ router.get('/tmdb/:type/:id', async (req, res) => {
         // Gerer le cas ou aucun resultat n'est trouve sur Coflix
         const similarityThreshold = 0.8;
 
-        if (!coflixResults || !coflixResults.length || (coflixResults[0] && coflixResults[0].similarity < similarityThreshold)) {
+        const wrongShow = !!coflixResults?.length &&
+          await coflixPosterBelongsToOtherShow(coflixResults[0], id, type);
+
+        if (!coflixResults || !coflixResults.length || (coflixResults[0] && coflixResults[0].similarity < similarityThreshold) || wrongShow) {
           const unavailableResult = {
             message: 'Contenu non disponible',
             tmdb_id: id,
             tmdb_details: tmdbDetails,
             _coflixRefreshedAt: Date.now(),
           };
-          if (!hasPlayableCoflixResult(latest, type)) {
+          if (wrongShow) {
+            // Le cache jouable pointe vers un homonyme : il doit etre remplace.
+            await saveToCache(CACHE_DIR.COFLIX, cacheKey, unavailableResult);
+          } else if (!hasPlayableCoflixResult(latest, type)) {
             await saveCoflixCachePreservingPlayable(cacheKey, type, unavailableResult);
           }
           coflixRefresh.markChecked(cacheKey);
@@ -834,3 +875,4 @@ module.exports = router;
 module.exports.configure = configure;
 module.exports.getTMDBDetails = getTMDBDetails;
 module.exports.findTvSeriesOnTMDB = findTvSeriesOnTMDB;
+module.exports.coflixPosterBelongsToOtherShow = coflixPosterBelongsToOtherShow;

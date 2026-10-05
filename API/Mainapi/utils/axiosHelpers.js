@@ -12,6 +12,7 @@ const fsp = require('fs').promises;
 const path = require('path');
 const writeFileAtomic = require('write-file-atomic');
 const { isHydrackerBlackout, buildBlackoutError } = require('./hydrackerBlackout');
+const { canonicalFStreamUrl } = require('../config/fstream');
 
 const {
   ENABLE_DARKINO_PROXY,
@@ -478,7 +479,7 @@ async function axiosDarkinoRequest(config) {
   throw lastError || new Error('Tous les proxies Darkino ont \u00e9chou\u00e9');
 }
 
-// Fonction utilitaire pour requ\u00eates Coflix avec rotation Cloudflare Workers
+// Fonction utilitaire pour les requêtes Coflix avec rotation de proxys
 async function axiosCoflixRequest(config) {
   // Si URL relative, on consid\u00e8re que c'est Coflix.
   const targetUrl = config.url || '';
@@ -490,7 +491,7 @@ async function axiosCoflixRequest(config) {
       return await deps.axiosCoflix({ ...config });
     }
 
-    // Utiliser makeCoflixRequest avec rotation SOCKS5
+    // Utiliser makeCoflixRequest avec le pool de proxys disponible
     const absoluteUrl = isAbsolute
       ? targetUrl
       : `${deps.COFLIX_BASE_URL}${targetUrl.startsWith('/') ? '' : '/'}${targetUrl}`;
@@ -507,7 +508,7 @@ async function axiosCoflixRequest(config) {
       console.log(`[Coflix] Erreur 403 Forbidden dans axiosCoflixRequest`);
       console.log(`[Coflix] URL: ${targetUrl}`);
       if (error.coflixProxy) {
-        console.log(`[Coflix] Cloudflare Worker: ${error.coflixProxy}`);
+        console.log(`[Coflix] Proxy: ${error.coflixProxy}`);
       }
       if (error.coflixProxiedUrl) {
         console.log(`[Coflix] Proxied URL: ${error.coflixProxiedUrl}`);
@@ -594,6 +595,16 @@ function withOptionalFStreamCookies(headers = {}) {
 }
 
 async function axiosFStreamRequest(config) {
+  // Éviter le 301 qui transforme le POST de recherche en GET sans son formulaire.
+  config = { ...config, url: canonicalFStreamUrl(config.url) };
+  if (config.baseURL) config.baseURL = canonicalFStreamUrl(config.baseURL);
+  if (config.headers) {
+    config.headers = Object.fromEntries(Object.entries(config.headers).map(([name, value]) => {
+      const canonical = /^(origin|referer)$/i.test(name) ? canonicalFStreamUrl(value) : value;
+      // Origin est une origine seule, sans le slash de chemin d'un Referer.
+      return [name, /^origin$/i.test(name) && canonical !== value ? new URL(canonical).origin : canonical];
+    }));
+  }
   const urlStr = config.url || '';
   const fstreamBaseUrl = deps.FSTREAM_BASE_URL || '';
   const isFStream = urlStr.includes(fstreamBaseUrl.replace('https://', '').replace('http://', '')) ||

@@ -109,6 +109,8 @@ BOOTSTRAP = r"""
     get(_target, property) {
       if (property === 'then') return undefined;
       if (property === Symbol.toPrimitive) return () => '';
+      // Le lecteur mesure un div `width:1in` : 96 px CSS dans un vrai navigateur.
+      if (['offsetWidth', 'offsetHeight', 'clientWidth', 'clientHeight'].includes(property)) return 96;
       return looseObject;
     },
     set() { return true; },

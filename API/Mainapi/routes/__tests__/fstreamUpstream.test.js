@@ -6,6 +6,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const cheerio = require('cheerio');
 const { createFStreamSearchCache } = require('../../utils/fstreamSearchCache');
+const { canonicalFStreamUrl } = require('../../config/fstream');
 const filename = path.resolve(__dirname, '../fstream.js');
 const source = fs.readFileSync(filename, 'utf8');
 const fragment = (begin, end) => {
@@ -74,6 +75,7 @@ test('les données statiques gardent leur version pendant 30 secondes puis voien
   const urls = [];
   const context = vm.createContext({
     Date: { now: () => time },
+    canonicalFStreamUrl,
     extractPageIdFromUrl: () => '42', extractBaseUrlFromLink: () => 'https://source.test',
     getShuffledAllProxies: () => [{ type: 'socks5' }],
     withFStreamProxy: (_entry, request) => request({}),

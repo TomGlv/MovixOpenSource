@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { getFrembedBase } from '../../utils/frembedConfig';
+import { openInNewTab } from '../../utils/openInNewTab';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import axios from 'axios';
@@ -14,7 +15,7 @@ import type { SeekStreamingHlsSource } from '../../utils/seekStreamingCandidates
 import { runExtractionPass } from '../../utils/runExtractionPass';
 import { pickAutoSelectedSource, sortHostersByPriority, type SourceAvailability } from '../../utils/sourceAutoSelect';
 import type { TopLevelSourceId } from '../../types/sourcePriority';
-import { getSourcePriorityPrefs, subscribeToPriorityChanges } from '../../utils/sourcePriorityPrefs';
+import { getSourcePriorityPrefs, buildDefaults, subscribeToPriorityChanges } from '../../utils/sourcePriorityPrefs';
 import { detectHoster } from '../../utils/hosterRegistry';
 import { setLastPlayer } from '../../utils/lastPlayerPref';
 import { getTmdbId } from '../../utils/idEncoder';
@@ -34,6 +35,7 @@ import {
   type SwiftfluxEntry,
   type SwiftfluxPlayback,
 } from '../../services/swiftfluxService';
+import { isHevcPlayable } from '../../utils/videoCodecSupport';
 import type { KisskhSource, KisskhSubtitleTrack } from '../../types/kisskh';
 import {
   createHlsAutoFallbackGuard,
@@ -41,6 +43,7 @@ import {
   resolveRenderedWatchSource,
   syncHlsActiveSource,
 } from '../../utils/hlsAutoFallbackGuard';
+import { readLocalStorage, writeLocalStorage } from '../../utils/browserStorage';
 const MAIN_API = import.meta.env.VITE_MAIN_API;
 const TMDB_API_KEY = import.meta.env.VITE_TMDB_API_KEY || '';
 
@@ -835,33 +838,43 @@ const WatchMovie: React.FC = () => {
       }
 
       // Add movie to continueWatching (if history is enabled)
-      if (localStorage.getItem('settings_disable_history') !== 'true') {
-        const continueWatching = JSON.parse(localStorage.getItem('continueWatching') || '{"movies": [], "tv": []}');
+      try {
+        const storage = window.localStorage;
+        if (storage.getItem('settings_disable_history') !== 'true') {
+          const continueWatching = JSON.parse(storage.getItem('continueWatching') ?? '{"movies": [], "tv": []}');
+          if (!continueWatching || typeof continueWatching !== 'object' || Array.isArray(continueWatching)) {
+            throw new Error('Invalid continueWatching data');
+          }
 
-        // Ensure structure exists
-        if (!continueWatching.movies) continueWatching.movies = [];
-        if (!continueWatching.tv) continueWatching.tv = [];
+          // Ensure structure exists
+          if (continueWatching.movies === undefined) continueWatching.movies = [];
+          else if (!Array.isArray(continueWatching.movies)) throw new Error('Invalid continueWatching movies');
+          if (continueWatching.tv === undefined) continueWatching.tv = [];
+          else if (!Array.isArray(continueWatching.tv)) throw new Error('Invalid continueWatching tv');
 
-        const movieIdInt = parseInt(id);
+          const movieIdInt = parseInt(id);
 
-        // Check if movie already exists (handle both old and new format)
-        const existingIndex = continueWatching.movies.findIndex((item: any) => {
-          const itemId = typeof item === 'number' ? item : item.id;
-          return itemId === movieIdInt;
-        });
+          // Check if movie already exists (handle both old and new format)
+          const existingIndex = continueWatching.movies.findIndex((item: any) => {
+            const itemId = typeof item === 'number' ? item : item?.id;
+            return itemId === movieIdInt;
+          });
 
-        if (existingIndex !== -1) {
-          // Remove existing entry to move it to the front
-          continueWatching.movies.splice(existingIndex, 1);
+          if (existingIndex !== -1) {
+            // Remove existing entry to move it to the front
+            continueWatching.movies.splice(existingIndex, 1);
+          }
+
+          // Add movie with timestamp at the beginning (no limit)
+          continueWatching.movies.unshift({
+            id: movieIdInt,
+            lastAccessed: new Date().toISOString()
+          });
+
+          writeLocalStorage('continueWatching', JSON.stringify(continueWatching));
         }
-
-        // Add movie with timestamp at the beginning (no limit)
-        continueWatching.movies.unshift({
-          id: movieIdInt,
-          lastAccessed: new Date().toISOString()
-        });
-
-        localStorage.setItem('continueWatching', JSON.stringify(continueWatching));
+      } catch {
+        // Un historique invalide ou indisponible ne doit pas bloquer la lecture.
       }
 
       // Initialize loading states for individual sources
@@ -1058,6 +1071,7 @@ const WatchMovie: React.FC = () => {
 
       // =========== TRAITEMENT DES RÉSULTATS DE FIREBASE/FREMBED ===========
       const customLinks = availabilityResult.customLinks || [];
+      const uqloadLink: string | undefined = customLinks.find((link: string) => link.toLowerCase().includes('uqload.'));
       const fetchedMp4Sources: { url: string; label?: string; language?: string; isVip?: boolean }[] = availabilityResult.mp4Links || [];
       const isFrembedAvailable = availabilityResult.frembedAvailable;
 
@@ -1835,7 +1849,8 @@ const WatchMovie: React.FC = () => {
             return true;
           }
           case 'swiftflux': {
-            if (!swiftfluxResult.available) return false;
+            // HEVC illisible ici (PC sans décodeur) : son sans image, on saute.
+            if (!swiftfluxResult.available || !isHevcPlayable()) return false;
             // Aucune URL à poser : la porte d'entrée s'en charge et remplira
             // `swiftfluxPlayback` une fois la pub vue et le Turnstile validé.
             setSelectedSource('swiftflux');
@@ -1990,8 +2005,9 @@ const WatchMovie: React.FC = () => {
           }
           case 'custom': {
             if (!customLinks.length) return false;
+            // Un lien Uqload uploadé en custom passe devant les autres
             setSelectedSource('custom');
-            setEmbedUrl(customLinks[0]);
+            setEmbedUrl(uqloadLink ?? customLinks[0]);
             setEmbedType('custom');
             currentSourceRef.current = 'custom';
             return true;
@@ -2036,58 +2052,27 @@ const WatchMovie: React.FC = () => {
         }
       };
 
-      // Special case for movie ID 1218925 - force custom source selection
-      // (overrides any user priority, comportement préservé)
-      // Garde-fou : si un lecteur Viblix (source `mp4`) existe, on ne force plus
-      // `custom` — le forçage servait à combler l'absence de lecteur direct.
-      if (id === '1218925' && fetchedMp4Sources.length === 0) {
-        console.log('🎯 Special case: Movie ID 1218925 - selecting custom source');
-        setSelectedSource('custom');
-        setEmbedUrl('https://movix1.embedseek.com/#h6j8');
-        setEmbedType('custom');
-        currentSourceRef.current = 'custom';
-        setOnlyVostfrAvailable(false);
-      }
-      // Special case for movie ID 1311031 - force custom source selection
-      // (même garde-fou Viblix que ci-dessus)
-      else if (id === '1311031' && fetchedMp4Sources.length === 0) {
-        console.log('🎯 Special case: Movie ID 1311031 - selecting custom source');
-
-        // Fetch custom links from API for this specific movie
-        try {
-          const customResponse = await axios.get(`${MAIN_API}/api/links/movie/${id}`);
-          if (customResponse.data && customResponse.data.success && customResponse.data.data && customResponse.data.data.links) {
-            const apiCustomLinks = customResponse.data.data.links;
-            // Get the first custom link (index 0)
-            const firstCustomLink = apiCustomLinks[0];
-            const customUrl = typeof firstCustomLink === 'string' ? firstCustomLink : firstCustomLink.url;
-
-            console.log('🎯 Using custom URL from API:', customUrl);
-            setSelectedSource('custom');
-            setEmbedUrl(customUrl);
-            setEmbedType('custom');
-            currentSourceRef.current = 'custom';
-            setOnlyVostfrAvailable(false);
-          } else {
-            // Fallback to hardcoded URL if API fails
-            console.log('⚠️ API failed, using fallback URL');
-            setSelectedSource('custom');
-            setEmbedUrl('https://movix1.embedseek.com/#ug3i');
-            setEmbedType('custom');
-            currentSourceRef.current = 'custom';
-            setOnlyVostfrAvailable(false);
-          }
-        } catch (error) {
-          console.error('Error fetching custom links for movie 1311031:', error);
-          // Fallback to hardcoded URL if API fails
+      // Lien Uqload uploadé en custom : il passe en tête quand aucun lecteur
+      // direct (HLS / Viblix) n'existe et que l'user n'a pas réglé sa priorité.
+      let uqloadPromoted = false;
+      if (uqloadLink && finalHlsSources.length === 0 && fetchedMp4Sources.length === 0) {
+        const prefs = getSourcePriorityPrefs();
+        const userOrderIds = prefs.categories.moviesTv.sourceOrder.map((s) => s.id);
+        const defaultOrderIds = buildDefaults().categories.moviesTv.sourceOrder.map((s) => s.id);
+        const hasUserCustomized = prefs.categories.moviesTv.pinnedSource !== null
+          || userOrderIds.length !== defaultOrderIds.length
+          || userOrderIds.some((sid, i) => sid !== defaultOrderIds[i]);
+        if (!hasUserCustomized) {
           setSelectedSource('custom');
-          setEmbedUrl('https://movix1.embedseek.com/#ug3i');
+          setEmbedUrl(uqloadLink);
           setEmbedType('custom');
           currentSourceRef.current = 'custom';
           setOnlyVostfrAvailable(false);
+          uqloadPromoted = true;
         }
       }
-      else {
+
+      if (!uqloadPromoted) {
         // Priority-driven auto-select. Construit la liste d'availability à partir
         // des sources disponibles après toutes les extractions.
         // Note : 'vox' n'existe pas pour les films (WatchTv uniquement).
@@ -2515,7 +2500,7 @@ const WatchMovie: React.FC = () => {
 
   useEffect(() => {
     // On ne fait rien si VIP activé
-    if (import.meta.env.is_vip === 'true' || import.meta.env.is_vip === true || localStorage.getItem('is_vip') === 'true') {
+    if (import.meta.env.is_vip === 'true' || import.meta.env.is_vip === true || readLocalStorage('is_vip') === 'true') {
       console.log('🚫 VIP activé - popup ads désactivé');
       return;
     }
@@ -2965,7 +2950,7 @@ const WatchMovie: React.FC = () => {
           <div className="fixed top-6 right-8 z-[10000] flex items-center gap-2">
             {/* Bouton Ouvrir dans une nouvelle page */}
             <button
-              onClick={() => window.open(embedUrl || '', '_blank', 'noopener')}
+              onClick={() => openInNewTab(embedUrl)}
               className="flex items-center gap-2 px-3 py-2 rounded-lg bg-gray-800/90 border border-gray-600 hover:bg-gray-700/90 text-white font-medium text-sm transition-all duration-200"
               title={t('watch.openInNewPage')}
             >
@@ -3237,6 +3222,13 @@ const WatchMovie: React.FC = () => {
               // Source vide = porte pas encore franchie : l'erreur est attendue,
               // elle ne doit pas rouvrir la porte en boucle.
               if (!swiftfluxPlayback) return;
+              // Image non décodable : repasser par la porte relancerait la même
+              // lecture sans image. On laisse choisir une autre source.
+              if (!isHevcPlayable()) {
+                setSwiftfluxPlayback(null);
+                setShowEmbedQuality(true);
+                return;
+              }
               // Le lien est à usage unique du point de vue de l'interface : on
               // repasse par la porte plutôt que de réessayer une URL périmée.
               setSwiftfluxPlayback(null);
@@ -3813,7 +3805,7 @@ const WatchMovie: React.FC = () => {
           <div className="fixed top-6 right-8 z-[10000] flex items-center gap-2">
             {/* Bouton Ouvrir dans une nouvelle page */}
             <button
-              onClick={() => window.open(embedUrl || '', '_blank', 'noopener')}
+              onClick={() => openInNewTab(embedUrl)}
               className="flex items-center gap-2 px-3 py-2 rounded-lg bg-gray-800/90 border border-gray-600 hover:bg-gray-700/90 text-white font-medium text-sm transition-all duration-200"
               title={t('watch.openInNewPage')}
             >

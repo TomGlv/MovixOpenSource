@@ -45,27 +45,33 @@ const ProfileMenu: React.FC = () => {
     let mounted = true;
 
     const checkAuth = () => {
-      const auth = localStorage.getItem('auth');
-      const discordAuth = localStorage.getItem('discord_auth');
-      const googleAuth = localStorage.getItem('google_auth');
-      const bip39Auth = localStorage.getItem('bip39_auth');
-      const isVipUser = isUserVip();
+      try {
+        const auth = localStorage.getItem('auth');
+        const discordAuth = localStorage.getItem('discord_auth');
+        const googleAuth = localStorage.getItem('google_auth');
+        const bip39Auth = localStorage.getItem('bip39_auth');
+        const isVipUser = isUserVip();
 
-      const isAuth = discordAuth === 'true' || googleAuth === 'true' || bip39Auth === 'true' || !!auth;
+        const isAuth = discordAuth === 'true' || googleAuth === 'true' || bip39Auth === 'true' || !!auth;
 
-      setIsAuthenticated(isAuth);
-      setIsVip(isVipUser);
+        setIsAuthenticated(isAuth);
+        setIsVip(isVipUser);
+      } catch {
+        // Conserver l'état courant si le stockage est inaccessible.
+      }
     };
 
     checkAuth();
     window.addEventListener('storage', checkAuth);
     window.addEventListener('vipStatusChanged', checkAuth);
 
-    if (localStorage.getItem('access_code')) {
-      void checkVipStatus().then(() => {
-        if (mounted) checkAuth();
-      });
-    }
+    try {
+      if (localStorage.getItem('access_code')) {
+        void checkVipStatus().then(() => {
+          if (mounted) checkAuth();
+        });
+      }
+    } catch { /* Conserver l'état courant si le stockage est inaccessible. */ }
 
     return () => {
       mounted = false;
@@ -81,7 +87,12 @@ const ProfileMenu: React.FC = () => {
         return;
       }
 
-      const authToken = localStorage.getItem('auth_token');
+      let authToken: string | null;
+      try {
+        authToken = localStorage.getItem('auth_token');
+      } catch {
+        return;
+      }
       if (!authToken) {
         setCanAccessAdminPanel(false);
         return;

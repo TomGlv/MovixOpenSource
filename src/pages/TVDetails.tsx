@@ -50,6 +50,10 @@ import { useTvAiringSchedule } from '@/hooks/useTvAiringSchedule';
 import { formatAiringDate, getAiringLabel, getEpisodeTimeline, resolveEpisodeAiring, resolveShowAiring } from '@/utils/tvAiring';
 import type { TvEpisodeDate, TvExternalIds } from '@/types/tvAiring';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
+import { useImageQuality, useImageViewport } from '../hooks/useImageQuality';
+import { useImageSlot } from '../hooks/useImageSlot';
+import { getCoverImageWidth, getTmdbImageProps, getTmdbImageUrl } from '../utils/tmdbImages';
+import { readLocalStorage } from '../utils/browserStorage';
 
 const MAIN_API = import.meta.env.VITE_MAIN_API;
 const TMDB_API_KEY = import.meta.env.VITE_TMDB_API_KEY || '';
@@ -146,6 +150,7 @@ interface Episode {
 }
 
 const DEFAULT_IMAGE = 'https://www.shutterstock.com/image-vector/default-image-icon-vector-missing-600nw-2079504220.jpg';
+const PENDING_IMAGE = 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
 
 // Constante pour activer/désactiver la vérification VIP pour le bouton download
 const ENABLE_VIP_DOWNLOAD_CHECK = false;
@@ -192,8 +197,10 @@ const getSeasonFallbackSvg = (label: string) =>
   `data:image/svg+xml;utf8,<svg width="500" height="750" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 750" preserveAspectRatio="xMidYMid meet"><rect width="100%" height="100%" fill="%23222"/><g><rect x="80" y="180" width="340" height="260" rx="32" fill="%23333" stroke="%23555" stroke-width="8"/><rect x="120" y="220" width="260" height="180" rx="16" fill="%23444"/><rect x="180" y="420" width="140" height="20" rx="8" fill="%23555"/></g><text x="50%" y="70%" fill="%23777" font-size="48" font-family="Arial, sans-serif" text-anchor="middle" dy=".3em">${encodeURIComponent(label)}</text></svg>`;
 
 // Composant pour une image avec lazy loading
-const LazyTVImage = ({ src, alt, className, onLoad }: {
+const LazyTVImage = ({ src, srcSet, sizes, alt, className, onLoad }: {
   src: string;
+  srcSet?: string;
+  sizes?: string;
   alt: string;
   className: string;
   onLoad?: () => void;
@@ -240,6 +247,8 @@ const LazyTVImage = ({ src, alt, className, onLoad }: {
           )}
           <img
             src={src}
+            srcSet={srcSet}
+            sizes={sizes}
             alt={alt}
             className={`w-full h-auto object-cover transition-opacity duration-300 ${isLoaded ? 'opacity-100' : 'opacity-0'
               }`}
@@ -255,6 +264,9 @@ const LazyTVImage = ({ src, alt, className, onLoad }: {
 // Composant pour la section Images des séries TV
 const TVImagesSection = ({ tvId }: { tvId: string }) => {
   const { t } = useTranslation();
+  const { effectiveImageQuality } = useImageQuality();
+  const { width: viewportWidth, dpr } = useImageViewport();
+  const imageDpr = Math.min(dpr, effectiveImageQuality === 'high' ? 3 : 2);
   const [images, setImages] = useState<TVImages | null>(null);
   const [loading, setLoading] = useState(false);
   const [selectedCategory, setSelectedCategory] = useState<'backdrops' | 'posters' | 'logos'>('backdrops');
@@ -262,12 +274,46 @@ const TVImagesSection = ({ tvId }: { tvId: string }) => {
   const [, setLoadedImagesCount] = useState(0);
   const [selectedLanguage, setSelectedLanguage] = useState<string>('all');
   const [showLanguageDropdown, setShowLanguageDropdown] = useState(false);
+  const mobileLogoGridRef = useRef<HTMLDivElement | null>(null);
+  const desktopLogoGridRef = useRef<HTMLDivElement | null>(null);
+  const logoSlotEnabled = !loading && Boolean(images) && showImages && selectedCategory === 'logos';
+  const mobileLogoGridSlot = useImageSlot(mobileLogoGridRef, logoSlotEnabled && viewportWidth < 768);
+  const desktopLogoGridSlot = useImageSlot(desktopLogoGridRef, logoSlotEnabled && viewportWidth >= 768);
 
   // États pour le téléchargement ZIP
   const [isDownloadingZip, setIsDownloadingZip] = useState(false);
   const [zipProgress, setZipProgress] = useState(0);
   const [zipStatus, setZipStatus] = useState<'idle' | 'downloading' | 'zipping' | 'complete' | 'error'>('idle');
   const [downloadedCount, setDownloadedCount] = useState(0);
+
+  const getGalleryImageProps = (image: TMDBImage) => {
+    if (selectedCategory === 'logos') {
+      const gridSlot = viewportWidth < 768 ? mobileLogoGridSlot : desktopLogoGridSlot;
+      if (gridSlot.width <= 0) return { src: PENDING_IMAGE };
+      const columns = viewportWidth < 768 ? 1 : viewportWidth < 1024 ? 3 : 4;
+      const cardWidth = viewportWidth < 768
+        ? (viewportWidth < 640 ? 256 : 288)
+        : (gridSlot.width - 16 * (columns - 1)) / columns;
+      const horizontalPadding = viewportWidth < 768 ? 48 : 64;
+      const imageWidth = Math.max(1, cardWidth - horizontalPadding);
+      return {
+        src: getTmdbImageUrl(image.file_path, {
+          kind: 'logo',
+          quality: effectiveImageQuality,
+          width: Math.ceil(imageWidth * imageDpr),
+          role: 'card',
+        }),
+      };
+    }
+
+    return getTmdbImageProps(image.file_path, {
+      kind: selectedCategory === 'posters' ? 'poster' : 'backdrop',
+      quality: effectiveImageQuality,
+      sizes: '(max-width: 639px) 16rem, (max-width: 767px) 18rem, (max-width: 1023px) calc(22.222vw - 1.778rem), calc(16.667vw - 2.25rem)',
+      role: 'card',
+      originalWidth: image.width,
+    });
+  };
 
   const fetchImages = async () => {
     if (images) return; // Ne pas refetch si déjà chargé
@@ -726,6 +772,7 @@ const TVImagesSection = ({ tvId }: { tvId: string }) => {
 
                 {/* Mobile: Ligne défilante d'images (horizontal scroll) */}
                 <motion.div
+                  ref={mobileLogoGridRef}
                   key={selectedCategory + '-mobile'}
                   initial={{ opacity: 0, y: 20 }}
                   animate={{ opacity: 1, y: 0 }}
@@ -743,7 +790,7 @@ const TVImagesSection = ({ tvId }: { tvId: string }) => {
                     >
                       <div className={`w-full h-auto ${selectedCategory === 'logos' ? 'p-6 bg-white/5 flex items-center justify-center' : ''}`}>
                         <LazyTVImage
-                          src={`https://image.tmdb.org/t/p/w500${image.file_path}`}
+                          {...getGalleryImageProps(image)}
                           alt={`${selectedCategory} ${index + 1}`}
                           className="w-full h-auto object-contain"
                           onLoad={handleImageLoad}
@@ -772,6 +819,7 @@ const TVImagesSection = ({ tvId }: { tvId: string }) => {
 
                 {/* Desktop: grille d'images (grid) */}
                 <motion.div
+                  ref={desktopLogoGridRef}
                   key={selectedCategory + '-desktop'}
                   initial={{ opacity: 0, y: 20 }}
                   animate={{ opacity: 1, y: 0 }}
@@ -789,7 +837,7 @@ const TVImagesSection = ({ tvId }: { tvId: string }) => {
                     >
                       <div className={`w-full h-auto ${selectedCategory === 'logos' ? 'p-8 bg-white/5' : ''}`}>
                         <LazyTVImage
-                          src={`https://image.tmdb.org/t/p/w500${image.file_path}`}
+                          {...getGalleryImageProps(image)}
                           alt={`${selectedCategory} ${index + 1}`}
                           className="w-full h-auto object-contain"
                           onLoad={handleImageLoad}
@@ -888,6 +936,9 @@ const fetchSeasonDetails = async (
 
 const TVDetails: React.FC = () => {
   const { t } = useTranslation();
+  const { effectiveImageQuality } = useImageQuality();
+  const { width: viewportWidth, height: viewportHeight, dpr } = useImageViewport();
+  const imageDpr = Math.min(dpr, effectiveImageQuality === 'high' ? 3 : 2);
   const [show, setShow] = useState<any>(null);
   const [, setIsLoading] = useState(true);
   const { id: encodedId } = useParams<{ id: string }>();
@@ -909,7 +960,7 @@ const TVDetails: React.FC = () => {
   const [showMovixRatingInfo, setShowMovixRatingInfo] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [backdropImage, setBackdropImage] = useState<string | null>(null);
+  const [bestBackdrop, setBestBackdrop] = useState<TMDBImage | null>(null);
   const [showTrailerPopup, setShowTrailerPopup] = useState(false);
   const [trailerVideo, setTrailerVideo] = useState<any>(null);
   const [isClosingTrailer, setIsClosingTrailer] = useState(false);
@@ -1023,6 +1074,10 @@ const TVDetails: React.FC = () => {
   const [isEpisodeWarningOpen, setEpisodeWarningOpen] = useState(false);
   // Ajoute les états pour les tabs et le scroll des tabs comme dans MovieDetails
   const [activeTab, setActiveTab] = useState<'overview' | 'details' | 'videos' | 'images' | 'cast' | 'characters' | 'crew'>('overview');
+  const detailsMediaSlot = useImageSlot(
+    seasonsSectionRef,
+    !loading && Boolean(tvShow) && activeTab === 'overview',
+  );
   const [isTabsScrollable, setIsTabsScrollable] = useState(false);
   const tabsContainerRef = useRef<HTMLDivElement>(null);
   // Dans les états, ajoute un état pour le chargement des vidéos
@@ -1497,6 +1552,7 @@ const TVDetails: React.FC = () => {
   const updateWatchStatus = (type: keyof WatchStatus, value: boolean, episodeKey?: string) => {
     setWatchStatus(prev => {
       let newStatus;
+      let persisted = true;
       const showId = id; // Assuming 'id' is the tvShowId from params
 
       if (episodeKey && showId) { // episodeKey is like "s1e1"
@@ -1551,6 +1607,7 @@ const TVDetails: React.FC = () => {
           }
           localStorage.setItem(storageKey, JSON.stringify(episodeData));
         } catch (error) {
+          persisted = false;
           console.error(`Error updating ${itemType} episodes in localStorage:`, error);
         }
 
@@ -1591,6 +1648,7 @@ const TVDetails: React.FC = () => {
               localStorage.setItem(storageKey, JSON.stringify(updatedList));
             }
           } catch (error) {
+            persisted = false;
             console.error(`Error updating ${type} in localStorage:`, error);
           }
         }
@@ -1623,7 +1681,7 @@ const TVDetails: React.FC = () => {
           };
         }
       }
-      return newStatus as WatchStatus;
+      return persisted ? newStatus as WatchStatus : prev;
     });
   };
 
@@ -1873,7 +1931,7 @@ const TVDetails: React.FC = () => {
             </div>
           </motion.button>
 
-          {(!ENABLE_VIP_DOWNLOAD_CHECK || localStorage.getItem('is_vip') === 'true') && (
+          {(!ENABLE_VIP_DOWNLOAD_CHECK || readLocalStorage('is_vip') === 'true') && (
             <motion.button
               whileHover={{ scale: 1.05 }}
               whileTap={{ scale: 0.95 }}
@@ -2370,8 +2428,8 @@ const TVDetails: React.FC = () => {
       // Trouver la meilleure image de fond
       const backdrops = imagesResponse.data.backdrops;
       if (backdrops && backdrops.length > 0) {
-        const bestBackdrop = backdrops.sort((a: any, b: any) => b.width - a.width)[0];
-        setBackdropImage(`https://image.tmdb.org/t/p/w1280${bestBackdrop.file_path}`);
+        const largestBackdrop = backdrops.sort((a: TMDBImage, b: TMDBImage) => b.width - a.width)[0];
+        setBestBackdrop(largestBackdrop);
       }
 
       // Récupérer la bande-annonce
@@ -2455,13 +2513,14 @@ const TVDetails: React.FC = () => {
   }, [id]);
 
   useEffect(() => {
+    setBestBackdrop(null);
     if (id) {
       fetchBackdropAndTrailer();
     }
   }, [id]);
 
   if (loading) {
-    return <DetailsSkeleton />;
+    return <DetailsSkeleton mediaType="tv" />;
   }
 
   if (error) return <div className="text-center text-red-500">{error}</div>;
@@ -2615,7 +2674,7 @@ const TVDetails: React.FC = () => {
                   value={selectedEpisode ? selectedEpisode.toString() : ""}
                   onChange={handleDropdownChange}
                   placeholder={t('details.chooseEpisode')}
-                  searchable={true}
+                  searchable={false}
                   className="w-full"
                 />
               </div>
@@ -2730,7 +2789,14 @@ const TVDetails: React.FC = () => {
                           <div className="relative aspect-video w-full">
                             {ep.still_path && !shouldHide('episodeImages') ? (
                               (() => {
-                                const imageUrl = `https://image.tmdb.org/t/p/original${ep.still_path}`;
+                                const imageUrl = detailsMediaSlot.width > 0
+                                  ? getTmdbImageUrl(ep.still_path, {
+                                    kind: 'still',
+                                    quality: effectiveImageQuality,
+                                    width: Math.ceil(episodeCardCssWidth * imageDpr),
+                                    role: 'card',
+                                  })
+                                  : getSeasonFallbackSvg(t('details.season').toUpperCase());
                                 const imageKey = `episode-s${selectedSeason || 'unknown'}-e${ep.episode_number}-still`;
                                 const hasFailed = failedImages[imageKey];
                                 const retryUrl = hasFailed ? `${imageUrl}?retry=${Date.now()}` : imageUrl;
@@ -2944,6 +3010,30 @@ const TVDetails: React.FC = () => {
     ? `https://image.tmdb.org/t/p/original${tvShow.backdrop_path || tvShow.poster_path}`
     : undefined;
   const tvDescription = tvShow.overview?.trim() || `Découvrez ${tvShow.name} sur Movix.`;
+  const posterCssWidth = viewportWidth < 768
+    ? viewportWidth - 32
+    : viewportWidth < 1024
+      ? (viewportWidth - 128) / 3
+      : (viewportWidth - 192) / 3;
+  const mainPosterUrl = getTmdbImageUrl(tvShow.poster_path, {
+    kind: 'poster',
+    quality: effectiveImageQuality,
+    width: Math.ceil(Math.max(1, posterCssWidth) * imageDpr),
+    role: 'detail',
+    fallback: DEFAULT_IMAGE,
+  });
+  const backdropImage = bestBackdrop
+    ? getTmdbImageUrl(bestBackdrop.file_path, {
+      kind: 'backdrop',
+      quality: effectiveImageQuality,
+      width: getCoverImageWidth(viewportWidth, viewportHeight, bestBackdrop.aspect_ratio, imageDpr),
+      role: 'background',
+    })
+    : null;
+  const measuredDetailsWidth = Math.max(1, detailsMediaSlot.width);
+  const gridCardWidth = (columns: number) => Math.max(1, (measuredDetailsWidth - 16 * (columns - 1)) / columns);
+  const episodeCardCssWidth = gridCardWidth(viewportWidth < 768 ? 1 : viewportWidth < 1024 ? 3 : 4);
+  const seasonCardCssWidth = gridCardWidth(viewportWidth < 640 ? 2 : viewportWidth < 768 ? 3 : viewportWidth < 1024 ? 4 : 5);
 
   return (
     <MotionConfig reducedMotion="user">
@@ -3166,7 +3256,7 @@ const TVDetails: React.FC = () => {
             <motion.img
               whileHover={{ scale: 1.03 }}
               transition={{ type: "spring", stiffness: 300, damping: 10 }}
-              src={tvShow.poster_path ? `https://image.tmdb.org/t/p/original${tvShow.poster_path}` : DEFAULT_IMAGE}
+              src={mainPosterUrl}
               alt={tvShow.name}
               className="w-full rounded-lg shadow-lg"
             />
@@ -3588,7 +3678,15 @@ const TVDetails: React.FC = () => {
                             .map((seasonMeta) => {
                             const season = seasonMeta.season_number;
                             const details = seasonsDetails[season] || seasonMeta;
-                            const imageUrl = details?.poster_path ? `https://image.tmdb.org/t/p/original${details.poster_path}` : getSeasonFallbackSvg(t('details.season').toUpperCase());
+                            const imageUrl = detailsMediaSlot.width > 0
+                              ? getTmdbImageUrl(details?.poster_path, {
+                                kind: 'poster',
+                                quality: effectiveImageQuality,
+                                width: Math.ceil(seasonCardCssWidth * imageDpr),
+                                role: 'card',
+                                fallback: getSeasonFallbackSvg(t('details.season').toUpperCase()),
+                              })
+                              : getSeasonFallbackSvg(t('details.season').toUpperCase());
                             const imageKey = `season-${season}-poster`;
                             const hasFailed = failedImages[imageKey];
                             const retryUrl = hasFailed ? `${imageUrl}?retry=${Date.now()}` : imageUrl;
@@ -3762,7 +3860,12 @@ const TVDetails: React.FC = () => {
                       >
                         {actor.profile_path ? (
                           <motion.img
-                            src={`https://image.tmdb.org/t/p/original${actor.profile_path}`}
+                            src={getTmdbImageUrl(actor.profile_path, {
+                              kind: 'profile',
+                              quality: effectiveImageQuality,
+                              width: Math.ceil(48 * imageDpr),
+                              role: 'card',
+                            })}
                             alt={actor.name}
                             className="w-12 h-12 rounded-full object-cover"
                             whileHover={{ scale: 1.1 }}
@@ -3820,7 +3923,12 @@ const TVDetails: React.FC = () => {
                       >
                         {member.profile_path ? (
                           <motion.img
-                            src={`https://image.tmdb.org/t/p/original${member.profile_path}`}
+                            src={getTmdbImageUrl(member.profile_path, {
+                              kind: 'profile',
+                              quality: effectiveImageQuality,
+                              width: Math.ceil(48 * imageDpr),
+                              role: 'card',
+                            })}
                             alt={member.name}
                             className="w-12 h-12 rounded-full object-cover"
                             whileHover={{ scale: 1.1 }}
@@ -3882,7 +3990,12 @@ const TVDetails: React.FC = () => {
                             >
                               {company.logo_path ? (
                                 <img
-                                  src={`https://image.tmdb.org/t/p/original${company.logo_path}`}
+                                  src={getTmdbImageUrl(company.logo_path, {
+                                    kind: 'logo',
+                                    quality: effectiveImageQuality,
+                                    width: Math.ceil(40 * imageDpr),
+                                    role: 'card',
+                                  })}
                                   alt={company.name}
                                   className="max-h-10 max-w-10"
                                 />
@@ -4600,7 +4713,12 @@ const TVDetails: React.FC = () => {
                             >
                               {network.logo_path ? (
                                 <img
-                                  src={`https://image.tmdb.org/t/p/original${network.logo_path}`}
+                                  src={getTmdbImageUrl(network.logo_path, {
+                                    kind: 'logo',
+                                    quality: effectiveImageQuality,
+                                    width: Math.ceil(40 * imageDpr),
+                                    role: 'card',
+                                  })}
                                   alt={network.name}
                                   className="max-h-10 max-w-10"
                                 />
@@ -5388,7 +5506,13 @@ const TVDetails: React.FC = () => {
                     className="block group/item relative rounded-lg overflow-hidden"
                   >
                     <img
-                      src={`https://image.tmdb.org/t/p/original${item.poster_path}`}
+                      {...getTmdbImageProps(item.poster_path, {
+                        kind: 'poster',
+                        quality: effectiveImageQuality,
+                        sizes: '(max-width: 639px) calc(50vw - 3rem), (max-width: 767px) calc(33.333vw - 2.333rem), (max-width: 927px) calc(25vw - 2rem), 12.5rem',
+                        role: 'card',
+                        fallback: DEFAULT_IMAGE,
+                      })}
                       alt={item.name}
                       className="w-full aspect-[2/3] object-cover rounded-lg transition-transform duration-300 group-hover/item:scale-105"
                     />

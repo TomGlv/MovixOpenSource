@@ -27,6 +27,10 @@ import { useBrowserUIPrefs } from '../hooks/useBrowserUIPrefs';
 import { useAddress } from '../context/AddressContext';
 import SettingsScreen from './SettingsScreen';
 
+const MAX_NETWORK_RETRIES = 2;
+const NETWORK_RETRY_WINDOW_MS = 30_000;
+const NETWORK_RETRY_DELAY_MS = 1000;
+
 export default function BrowserScreen() {
   const insets = useSafeAreaInsets();
   const webViewRef = useRef<WebViewBrowserRef>(null);
@@ -50,6 +54,8 @@ export default function BrowserScreen() {
   const [dnsEnabled, setDnsEnabled] = useState(false);
   const [settingsVisible, setSettingsVisible] = useState(false);
   const [isPictureInPictureActive, setIsPictureInPictureActive] = useState(false);
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const networkRetriesRef = useRef({ count: 0, since: 0 });
 
   const activeUrl = urlChain[mirrorIndex] ?? '';
 
@@ -111,6 +117,22 @@ export default function BrowserScreen() {
   const onWebViewError = useCallback(
     (description: string) => {
       console.warn('[BrowserScreen] WebView error', description, 'on', activeUrl);
+      // Le réseau a changé pendant le chargement (VPN DNS qui démarre, passage
+      // Wi-Fi/4G) : le miroir n'y est pour rien, on recharge le même.
+      const now = Date.now();
+      const retries = networkRetriesRef.current;
+      if (now - retries.since > NETWORK_RETRY_WINDOW_MS) {
+        retries.count = 0;
+        retries.since = now;
+      }
+      if (
+        description.includes('ERR_NETWORK_CHANGED') &&
+        retries.count < MAX_NETWORK_RETRIES
+      ) {
+        retries.count += 1;
+        setTimeout(() => setLoadAttempt(n => n + 1), NETWORK_RETRY_DELAY_MS);
+        return;
+      }
       if (mirrorIndex + 1 < urlChain.length) {
         setMirrorIndex(i => i + 1);
       } else {
@@ -153,7 +175,7 @@ export default function BrowserScreen() {
     }]}>
       <View style={styles.webViewContainer}>
         <WebViewBrowser
-          key={activeUrl}
+          key={`${activeUrl}#${loadAttempt}`}
           ref={webViewRef}
           url={activeUrl}
           onNavigationStateChange={onNavigationStateChange}

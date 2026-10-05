@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo, lazy, Suspense } from 'react';
 import { lazyWithRetry } from '@/routing/lazyWithRetry';
-import { createPortal } from 'react-dom';
+import { createPortal, flushSync } from 'react-dom';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -96,6 +96,16 @@ const CineGraphPage: React.FC = () => {
   // Graph ref
   const graphRef = useRef<ForceGraphMethods>();
   const [graphReady, setGraphReady] = useState(false);
+  const [enableNodeDrag, setEnableNodeDrag] = useState(true);
+  const setNodeDragForTouch = useCallback((enabled: boolean, immediate: boolean) => {
+    if (immediate) {
+      // react-kapsule transmet les props modifiées au moteur pendant le rendu.
+      // Le subject d3-drag du même touchstart voit donc la valeur désactivée.
+      flushSync(() => setEnableNodeDrag(enabled));
+      return;
+    }
+    setEnableNodeDrag(enabled);
+  }, []);
   const handleGraphRef = useCallback((instance: ForceGraphMethods | null) => {
     graphRef.current = instance ?? undefined;
     setGraphReady(Boolean(instance));
@@ -403,7 +413,11 @@ const CineGraphPage: React.FC = () => {
       return best;
     };
 
-    const releaseTouchGuard = bindSingleNodeTouchDrag(canvas, (x, y) => pickNode(x, y) !== null);
+    const releaseTouchGuard = bindSingleNodeTouchDrag(
+      canvas,
+      (x, y) => pickNode(x, y) !== null,
+      setNodeDragForTouch,
+    );
     let downX = 0;
     let downY = 0;
     let lastHoverId: string | null = null;
@@ -440,7 +454,7 @@ const CineGraphPage: React.FC = () => {
       canvas.removeEventListener('pointermove', onMove);
       canvas.removeEventListener('pointerleave', onLeave);
     };
-  }, [filteredData, graphReady, handleNodeClick, handleNodeHover]);
+  }, [filteredData, graphReady, handleNodeClick, handleNodeHover, setNodeDragForTouch]);
 
   // ─── Double-click to explore deeper ────────────────────────────────────────
 
@@ -994,7 +1008,7 @@ const CineGraphPage: React.FC = () => {
                 d3VelocityDecay={0.4}
                 cooldownTicks={80}
                 warmupTicks={50}
-                enableNodeDrag={true}
+                enableNodeDrag={enableNodeDrag}
                 enableZoomInteraction={true}
                 enablePanInteraction={true}
                 minZoom={0.2}
@@ -1274,9 +1288,9 @@ const CineGraphPage: React.FC = () => {
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
                     onClick={closeHelp}
-                    className="text-white/50 hover:text-white p-2 rounded-lg hover:bg-white/10 transition-colors"
+                    className="text-white/50 hover:text-white p-2 rounded-lg hover:bg-white/10 transition-colors group/icon"
                   >
-                    <X className="w-5 h-5 md:w-6 md:h-6" />
+                    <X className="w-5 h-5 md:w-6 md:h-6 text-white opacity-50 group-hover/icon:opacity-100 transition-[color,opacity]" />
                   </motion.button>
                 </div>
 
@@ -1346,9 +1360,9 @@ const CineGraphPage: React.FC = () => {
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
                     onClick={closeSettings}
-                    className="text-white/50 hover:text-white p-2 rounded-lg hover:bg-white/10 transition-colors"
+                    className="text-white/50 hover:text-white p-2 rounded-lg hover:bg-white/10 transition-colors group/icon"
                   >
-                    <X className="w-5 h-5 md:w-6 md:h-6" />
+                    <X className="w-5 h-5 md:w-6 md:h-6 text-white opacity-50 group-hover/icon:opacity-100 transition-[color,opacity]" />
                   </motion.button>
                 </div>
 

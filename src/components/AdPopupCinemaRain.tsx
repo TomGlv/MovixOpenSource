@@ -6,6 +6,7 @@ import { useEffect, useLayoutEffect, useRef } from "react";
 import { useLightMode } from '@/context/LightModeContext';
 import { createCinemaMotifSequence } from "@/data/cinemaMotifs";
 import type { CinemaMotif } from "@/types/cinemaMotifs";
+import { fitCanvasBitmapSize, isCanvasInvalidStateError } from '@/utils/canvasSizing';
 
 interface LightbarOptions {
   motif?: CinemaMotif;
@@ -40,6 +41,19 @@ const loadImage = (url: string) => {
     imageCache.set(url, image);
   }
   return image;
+};
+
+// HTMLImageElement.decode manque avant Chrome 64 (WebView et TV anciennes,
+// GlitchTip DK) : attendre alors le chargement classique de l'image.
+const decodeImage = (image: HTMLImageElement): Promise<void> => {
+  if (typeof image.decode === 'function') return image.decode();
+  if (image.complete) {
+    return image.naturalWidth > 0 ? Promise.resolve() : Promise.reject(new Error('Image indisponible'));
+  }
+  return new Promise((resolve, reject) => {
+    image.addEventListener('load', () => resolve(), { once: true });
+    image.addEventListener('error', () => reject(new Error('Image indisponible')), { once: true });
+  });
 };
 
 const prepareBeamSprite = (url: string, image: HTMLImageElement) => {
@@ -323,19 +337,27 @@ const AdPopupCinemaRain = ({ unlocked = false }: { unlocked?: boolean }) => {
     let preparationGeneration = 0;
     let previousTime = 0;
     let pixelRatio = 1;
+    let pixelRatioY = 1;
     let measured = false;
     let regions: ReadableRegion[] = [];
     const dialog = canvas.closest('[role="dialog"]');
 
     const measure = () => {
       if (reducedMotion.matches) return;
-      const ratio = Math.min(window.devicePixelRatio || 1, 2);
-      const width = Math.round(canvas.clientWidth * ratio);
-      const height = Math.round(canvas.clientHeight * ratio);
-      if (!width || !height) return;
+      const cssWidth = canvas.clientWidth;
+      const cssHeight = canvas.clientHeight;
+      const size = fitCanvasBitmapSize(cssWidth, cssHeight, Math.min(window.devicePixelRatio || 1, 2));
+      if (!size) {
+        measured = false;
+        return;
+      }
       // Grouper les lectures avant de redimensionner le canvas.
       const bounds = canvas.getBoundingClientRect();
-      const scale = canvas.clientWidth / bounds.width;
+      if (!bounds.width) {
+        measured = false;
+        return;
+      }
+      const scale = cssWidth / bounds.width;
       regions = Array.from(dialog?.querySelectorAll('[data-ad-copy]') ?? []).map(element => {
         const rect = element.getBoundingClientRect();
         return {
@@ -345,16 +367,33 @@ const AdPopupCinemaRain = ({ unlocked = false }: { unlocked?: boolean }) => {
           bottom: (rect.bottom - bounds.top) * scale + 16,
         };
       });
-      if (canvas.width !== width || canvas.height !== height) {
-        const scaleX = (width / ratio) / (canvas.width / pixelRatio);
+      if (
+        canvas.width !== size.width
+        || canvas.height !== size.height
+        || pixelRatio !== size.scaleX
+        || pixelRatioY !== size.scaleY
+      ) {
+        const previousLogicalWidth = canvas.width / pixelRatio;
+        const scaleX = previousLogicalWidth > 0 ? cssWidth / previousLogicalWidth : 1;
         for (const particle of particles) {
           particle.x *= scaleX;
-          particle.pixelRatio = ratio;
+          particle.pixelRatio = size.scaleX;
         }
-        canvas.width = width;
-        canvas.height = height;
+        try {
+          canvas.width = size.width;
+          canvas.height = size.height;
+          const context = canvas.getContext('2d');
+          context?.setTransform(size.scaleX, 0, 0, size.scaleY, 0, 0);
+        } catch (error) {
+          if (!isCanvasInvalidStateError(error)) throw error;
+          canvas.width = 0;
+          canvas.height = 0;
+          measured = false;
+          return;
+        }
       }
-      pixelRatio = ratio;
+      pixelRatio = size.scaleX;
+      pixelRatioY = size.scaleY;
       measured = true;
     };
     measureRef.current = measure;
@@ -382,7 +421,7 @@ const AdPopupCinemaRain = ({ unlocked = false }: { unlocked?: boolean }) => {
           const { url, motifId, depth } = pendingSprites[0];
           const image = loadImage(url);
           if (motifId) image.dataset.cinemaMotif = motifId;
-          void image.decode().then(() => {
+          void decodeImage(image).then(() => {
             if (generation !== preparationGeneration) return;
             if (depth === undefined) prepareBeamSprite(url, image);
             else prepareSprite(url, image, depth);
@@ -399,16 +438,25 @@ const AdPopupCinemaRain = ({ unlocked = false }: { unlocked?: boolean }) => {
     };
 
     const particlesLoop = (time: number) => {
+      frame = null;
+      if (!measured) return;
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
 
       const delta = previousTime ? Math.min((time - previousTime) / (1000 / 60), 3) : 1;
       previousTime = time;
-      ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
-      ctx.clearRect(0, 0, canvas.width / pixelRatio, canvas.height / pixelRatio);
-      for (const particle of particles) {
-        particle.update(canvas, delta, particles);
-        particle.render(canvas, regions);
+      try {
+        ctx.clearRect(0, 0, canvas.width / pixelRatio, canvas.height / pixelRatioY);
+        for (const particle of particles) {
+          particle.update(canvas, delta, particles);
+          particle.render(canvas, regions);
+        }
+      } catch (error) {
+        if (!isCanvasInvalidStateError(error)) throw error;
+        canvas.width = 0;
+        canvas.height = 0;
+        measured = false;
+        return;
       }
       frame = requestAnimationFrame(particlesLoop);
     };
@@ -451,25 +499,53 @@ const AdPopupCinemaRain = ({ unlocked = false }: { unlocked?: boolean }) => {
       schedulePreparation();
     };
 
+    const handleReducedMotionChange = () => {
+      if (!reducedMotion.matches && !measured) measure();
+      syncActivity();
+    };
+
     document.addEventListener("visibilitychange", syncActivity);
-    reducedMotion.addEventListener("change", syncActivity);
+    const legacyReducedMotion = reducedMotion as MediaQueryList & {
+      addListener?: (listener: (event: MediaQueryListEvent) => void) => void;
+      removeListener?: (listener: (event: MediaQueryListEvent) => void) => void;
+    };
+    if (typeof reducedMotion.addEventListener === 'function') {
+      reducedMotion.addEventListener("change", handleReducedMotionChange);
+    } else {
+      legacyReducedMotion.addListener?.(handleReducedMotionChange);
+    }
     // La première mesure suit le layout natif via ResizeObserver. Une lecture
     // synchrone au montage forcerait le layout de la page derrière le dialog.
-    const observer = new ResizeObserver(() => {
+    const observer = typeof ResizeObserver === 'undefined'
+      ? null
+      : new ResizeObserver(() => {
+        measure();
+        if (frame === null) syncActivity();
+      });
+    observer?.observe(canvas);
+    if (dialog) observer?.observe(dialog);
+    dialog?.querySelectorAll('[data-ad-copy]').forEach(element => observer?.observe(element));
+    const handleWindowResize = () => {
       measure();
       if (frame === null) syncActivity();
-    });
-    observer.observe(canvas);
-    if (dialog) observer.observe(dialog);
-    dialog?.querySelectorAll('[data-ad-copy]').forEach(element => observer.observe(element));
+    };
+    if (!observer) {
+      window.addEventListener('resize', handleWindowResize, { passive: true });
+      measure();
+    }
     syncActivity();
 
     return () => {
       stop();
-      observer.disconnect();
+      observer?.disconnect();
+      window.removeEventListener('resize', handleWindowResize);
       measureRef.current = null;
       document.removeEventListener("visibilitychange", syncActivity);
-      reducedMotion.removeEventListener("change", syncActivity);
+      if (typeof reducedMotion.removeEventListener === 'function') {
+        reducedMotion.removeEventListener("change", handleReducedMotionChange);
+      } else {
+        legacyReducedMotion.removeListener?.(handleReducedMotionChange);
+      }
     };
   }, [effectivePrefs.bgAnimations]);
 

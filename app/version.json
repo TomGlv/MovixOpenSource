@@ -1,13 +1,13 @@
 {
-  "version": "2.6.1",
-  "buildNumber": 38,
+  "version": "2.6.2",
+  "buildNumber": 39,
   "apkUrl": "https://raw.githubusercontent.com/movixstream/MovixOpenSource/main/app/movix-android.apk",
-  "apkSizeBytes": 72592577,
-  "apkSha256": "371b3d701dfb03a70a84ac4cd1d8891f3fe4f7d06037d2350c1decf3862ae91b",
+  "apkSizeBytes": 72613057,
+  "apkSha256": "617be8e70666bb5804525949f01e27c8c59e4bdcdbecb206c1f0577769e859a0",
   "mandatory": false,
-  "releasedAt": "2026-09-20T14:59:32.254Z",
+  "releasedAt": "2026-10-05T15:07:36.000Z",
   "releaseNotes": {
-    "fr": "Correction du lecteur Streamed Golf et mise à jour du userscript embarqué.",
-    "en": "Fixed Streamed Golf playback and updated the embedded userscript."
+    "fr": "Correction de l'extraction Fsvid et Vidzy. Ajout des sous-titres du lecteur Uqload. Correction du changeur de DNS Cloudflare (DNS chiffré, attente du VPN et miroirs de secours). Correction du cast sur certains flux.",
+    "en": "Fixed Fsvid and Vidzy extraction. Added Uqload player subtitles. Fixed the Cloudflare DNS switcher (encrypted DNS, waiting for the VPN and fallback mirrors). Fixed casting on some streams."
   }
 }

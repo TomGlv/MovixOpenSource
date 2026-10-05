@@ -11,10 +11,11 @@ import { findDarkiWorldTitleId } from '@/utils/darkiWorldResultMatch';
 import { useAgeRestrictedContent } from '../hooks/useAgeRestrictedContent';
 import TurnstileWidget from '@/components/TurnstileWidget';
 import { decodeDownloadLink } from '@/services/downloadLinksService';
+import { TURNSTILE_SITE_KEY } from '@/utils/turnstileKeys';
+import { copyText } from '@/utils/clipboard';
 
 const MAIN_API = import.meta.env.VITE_MAIN_API;
 const TMDB_API_KEY = import.meta.env.VITE_TMDB_API_KEY || '';
-const TURNSTILE_SITE_KEY = import.meta.env.VITE_TURNSTILE_SITE_KEY;
 
 interface DownloadLink {
   id: string;
@@ -567,7 +568,8 @@ const LinkSelector: React.FC<{
 
   const copyToClipboard = (text: string) => {
     if (!text) return;
-    navigator.clipboard.writeText(text).then(() => {
+    void copyText(text).then((copied) => {
+      if (!copied) return;
       toast.success(t('download.copied'));
     });
   };

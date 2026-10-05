@@ -6,8 +6,9 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { PassThrough } = require('node:stream');
 const { createProxyAgentPool } = require('../proxyAgentPool');
+const { createCoflixProxyPolicy } = require('../coflixProxyPolicy');
 
-function fixture(transport) {
+function fixture(transport, policyOptions) {
   const filename = path.resolve(__dirname, '../proxyManager.js');
   const code = fs.readFileSync(filename, 'utf8');
   const start = code.indexOf('async function makeCoflixRequest(');
@@ -19,8 +20,10 @@ function fixture(transport) {
     agents.push(agent);
     return agent;
   } });
+  const proxies = [{ host: 'proxy.test', port: 8080 }, { host: 'backup.test', port: 8080 }];
   const context = vm.createContext({ coflixHttpAgentPool: pool,
-    pickProxyscrapeCandidates: () => ({ proxies: [{ host: 'proxy.test', port: 8080 }, { host: 'backup.test', port: 8080 }], useSocks: false }),
+    coflixProxyPolicy: createCoflixProxyPolicy(policyOptions),
+    pickProxyscrapeCandidates: (available = () => true) => ({ proxies: proxies.filter(proxy => available(proxy, false)), useSocks: false, totalAvailable: proxies.length }),
     axios: transport,
   });
   vm.runInContext(code.slice(start, end) + '\nglobalThis.request = makeCoflixRequest;', context, { filename });
@@ -100,4 +103,30 @@ test('le dernier proxy transmet son flux d’erreur encore lisible à l’appela
   streams[1].destroy();
   await new Promise(resolve => setImmediate(resolve));
   assert.ok(f.agents.every(agent => agent.destroyed));
+});
+
+test('un proxy en panne est évité sur les requêtes suivantes puis redevient éligible', async () => {
+  let now = 0;
+  const used = [];
+  const f = fixture(async config => {
+    used.push(config.httpsAgent.key);
+    if (used.length === 1) throw Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' });
+    return { data: 'OK' };
+  }, { now: () => now, cooldownMs: 30000 });
+  await f.request('https://coflix.example/?s=serie');
+  await f.request('https://coflix.example/?s=autre');
+  now = 30001;
+  await f.request('https://coflix.example/?s=encore');
+  assert.deepEqual(used, ['http://proxy.test:8080', 'http://backup.test:8080',
+    'http://backup.test:8080', 'http://proxy.test:8080']);
+  f.pool.clear();
+});
+
+test('la quarantaine de tout le pool ne provoque aucun accès direct au site', async () => {
+  let calls = 0;
+  const f = fixture(async () => { calls++; throw Object.assign(new Error('blocked'), { response: { status: 403 } }); });
+  await assert.rejects(f.request('https://coflix.example/'));
+  await assert.rejects(f.request('https://coflix.example/'), { code: 'COFLIX_PROXIES_UNAVAILABLE' });
+  assert.equal(calls, 2);
+  f.pool.clear();
 });

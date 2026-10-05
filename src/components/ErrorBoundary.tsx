@@ -1,5 +1,5 @@
 import React from 'react';
-import { isChunkLoadError, reloadForChunkFailure } from '../routing/lazyWithRetry';
+import { isChunkLoadError, isChunkResponseError, reloadForChunkFailure } from '../routing/lazyWithRetry';
 import { captureCrash, isRecoverableError } from '../utils/errorTracking';
 
 interface ErrorBoundaryState {
@@ -29,7 +29,7 @@ type PerformanceWithMemory = Performance & {
   memory?: { usedJSHeapSize: number; jsHeapSizeLimit: number };
 };
 
-function getDeviceInfo() {
+function readDeviceInfo() {
   const ua = navigator.userAgent;
   const jsHeap = (performance as PerformanceWithMemory).memory;
 
@@ -76,6 +76,20 @@ function getDeviceInfo() {
   };
 }
 
+function getDeviceInfo() {
+  try {
+    return readDeviceInfo();
+  } catch {
+    // Firefox peut invalider screen/navigator lors d'un changement de document.
+    // Le panneau d'erreur doit rester affichable sans ces détails facultatifs.
+    return {
+      browser: 'Inconnu', os: 'Inconnu', device: 'Inconnu', screen: 'N/A',
+      viewport: 'N/A', language: 'N/A', url: '', userAgent: '', online: false,
+      timestamp: new Date().toISOString(), memory: 'N/A',
+    };
+  }
+}
+
 class ErrorBoundary extends React.Component<React.PropsWithChildren, ErrorBoundaryState> {
   constructor(props: React.PropsWithChildren) {
     super(props);
@@ -93,7 +107,9 @@ class ErrorBoundary extends React.Component<React.PropsWithChildren, ErrorBounda
     if (isRecoverableError(error, true)) {
       // Not a code bug — recover quietly with a guarded reload (the budget in
       // reloadForChunkFailure caps attempts so this can never loop).
-      const reloadScheduled = reloadForChunkFailure();
+      // Un chunk abîmé détecté au rendu vide d'abord le cache d'assets, sinon
+      // le rechargement resservirait la même copie.
+      const reloadScheduled = reloadForChunkFailure({ purgeAssetCache: isChunkResponseError(error) });
       this.setState({ recoverable: true, reloadScheduled });
       return;
     }

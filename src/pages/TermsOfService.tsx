@@ -117,7 +117,6 @@ const TermsOfService = () => {
         paragraphs: getStringArray('termsOfServicePage.supportCard.paragraphs'),
         actions: [
           { label: t('termsOfServicePage.supportCard.actions.privacy'), to: '/privacy', variant: 'primary' },
-          { label: t('termsOfServicePage.supportCard.actions.dmca'), to: '/dmca', variant: 'secondary' },
           { label: t('termsOfServicePage.supportCard.actions.contact'), href: `mailto:${CONTACT_EMAIL}`, variant: 'ghost' },
           { label: t('termsOfServicePage.supportCard.actions.telegram'), href: TELEGRAM_URL, external: true, variant: 'ghost' },
         ],

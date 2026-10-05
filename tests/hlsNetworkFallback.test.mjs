@@ -71,6 +71,7 @@ function playerFixture() {
   }
   const cleanup = sourceEffect('src/components/HLSPlayer.tsx', 'const clearSourceTimeout', {
     isCasting: false, Hls, hlsRef, videoRef: { current: video },
+    nativeAirPlay: false, playbackRestoreRef: { current: null }, autoPlay: false,
     postCastPlaybackSuppressedRef: { current: false }, getLocalPlaybackInitPolicy,
     bufferingTimeoutRef: { current: null }, sourceTimeoutRef: { current: null },
     setTimeout: noop, clearTimeout: noop, setIsLoading: noop, setIsBuffering: noop,

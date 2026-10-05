@@ -18,6 +18,17 @@ import { loadNetworkJournalPreference } from './services/networkJournal';
 
 const { DnsModule } = NativeModules;
 
+// Plafond d'attente du VPN au démarrage : si Android redemande l'accord VPN,
+// l'app ne reste pas bloquée derrière la boîte de dialogue.
+const DNS_START_WAIT_MS = 6000;
+
+function waitAtMost<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
+  return Promise.race([
+    promise,
+    new Promise<undefined>(resolve => setTimeout(() => resolve(undefined), ms)),
+  ]);
+}
+
 function promptDns() {
   Alert.alert(
     'DNS Cloudflare 1.1.1.1',
@@ -92,7 +103,13 @@ export default function App() {
           }
           setDnsSettled(true);
         } else if (stored === 'true' && DnsModule && Platform.OS === 'android') {
-          DnsModule.enable('1.1.1.1', '1.0.0.1').catch(() => {});
+          // Monter le VPN AVANT de charger Movix : lancé en parallèle, le
+          // changement de réseau coupait la récupération des domaines et la
+          // première page, et l'app affichait « Movix injoignable ».
+          await waitAtMost(
+            DnsModule.enable('1.1.1.1', '1.0.0.1').catch(() => {}),
+            DNS_START_WAIT_MS,
+          );
           setDnsSettled(true);
         } else if (stored === 'true') {
           await AsyncStorage.setItem('dns_enabled', 'false');

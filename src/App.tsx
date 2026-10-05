@@ -28,13 +28,14 @@ import { SITE_URL } from './config/runtime';
 import RequireUsernameChange from './components/RequireUsernameChange';
 import { TopProgressBar } from './components/TopProgressBar';
 import SmoothScroll from './components/SmoothScroll';
-import { ROUTES, type RouteEntry } from './routing/registry';
+import { getProviderCatalogScope, ROUTES, type RouteEntry } from './routing/registry';
 import { IdleRoutePrefetch } from '@/routing/IdleRoutePrefetch';
 import { DelayedSuspense } from './components/DelayedSuspense';
 import { RouteProgressBar } from './components/RouteProgressBar';
 import ScreenSaver from './components/ScreenSaver';
 import { useIdleTimer } from './hooks/useIdleTimer';
 import { startVipVerification } from './utils/vipUtils';
+import { readLocalStorage, readSessionStorage } from './utils/browserStorage';
 import { broadcastAuthChange, clearStoredAuthSession, getResolvedAccountContext } from './utils/accountAuth';
 import { isSyncableStorageKey, SYNC_OUTBOX_STORAGE_KEY } from './utils/syncStorage';
 import { isWrappedTestRoute } from './utils/wrappedExperiment';
@@ -227,11 +228,11 @@ const isInStandaloneMode = () => {
   );
 };
 
-const shouldPreserveScrollOnBack = () => localStorage.getItem('settings_disable_auto_scroll') === 'true';
+const shouldPreserveScrollOnBack = () => readLocalStorage('settings_disable_auto_scroll') === 'true';
 
-const shouldDisableRouteScrollToTop = () => localStorage.getItem('settings_disable_route_scroll_to_top') === 'true';
+const shouldDisableRouteScrollToTop = () => readLocalStorage('settings_disable_route_scroll_to_top') === 'true';
 
-const isSmoothScrollEnabled = () => localStorage.getItem('settings_smooth_scroll') !== 'false';
+const isSmoothScrollEnabled = () => readLocalStorage('settings_smooth_scroll') !== 'false';
 
 const shouldAnimateScrollToTop = () => {
   if (!isSmoothScrollEnabled()) {
@@ -308,7 +309,7 @@ const ScrollToTop = () => {
   useEffect(() => {
     const handleRestorationSync = (event?: StorageEvent) => {
       if (
-        event instanceof StorageEvent &&
+        event?.type === 'storage' &&
         event.key &&
         event.key !== 'settings_disable_auto_scroll' &&
         event.key !== 'settings_disable_route_scroll_to_top'
@@ -347,9 +348,19 @@ const ScrollToTop = () => {
     prevScrollUrlRef.current = scrollUrl;
 
     // Sur /search, ne pas scroll to top si seuls les query params changent (pagination)
-    const pathChanged = prevPathRef.current !== location.pathname;
+    const previousPath = prevPathRef.current;
+    const pathChanged = previousPath !== location.pathname;
     prevPathRef.current = location.pathname;
     if (!pathChanged && location.pathname === '/search') {
+      return undefined;
+    }
+
+    // Le catalogue provider gère lui-même le scroll de sa pagination. Garder
+    // aussi la position lors d'un changement Films/Séries/genre évite deux
+    // animations concurrentes et laisse les filtres se mettre à jour en place.
+    const previousProviderCatalog = getProviderCatalogScope(previousPath);
+    const currentProviderCatalog = getProviderCatalogScope(location.pathname);
+    if (currentProviderCatalog && currentProviderCatalog === previousProviderCatalog) {
       return undefined;
     }
 
@@ -474,14 +485,14 @@ const IOSHomeScreenHandler = () => {
 };
 
 const PrivateRoute = ({ children }: { children: React.ReactNode }) => {
-  const isDiscordAuth = localStorage.getItem('discord_auth') === 'true';
-  const isGoogleAuth = localStorage.getItem('google_auth') === 'true';
-  const isBip39Auth = localStorage.getItem('bip39_auth') === 'true';
-  const isVipUser = localStorage.getItem('is_vip') === 'true';
+  const isDiscordAuth = readLocalStorage('discord_auth') === 'true';
+  const isGoogleAuth = readLocalStorage('google_auth') === 'true';
+  const isBip39Auth = readLocalStorage('bip39_auth') === 'true';
+  const isVipUser = readLocalStorage('is_vip') === 'true';
 
   // Vérifier l'ancienne méthode d'authentification VIP (pour compatibilité)
   let isVipAuth = false;
-  const authStr = localStorage.getItem('auth');
+  const authStr = readLocalStorage('auth');
   if (authStr) {
     try {
       const authObj = JSON.parse(authStr);
@@ -512,13 +523,15 @@ const lazyComponentCache = new Map<string, React.LazyExoticComponent<React.Compo
 const getCachedLazy = (entry: RouteEntry) => {
   let cached = lazyComponentCache.get(entry.path);
   if (!cached) {
-    cached = lazy(entry.loader as () => Promise<{ default: React.ComponentType<unknown> }>);
+    // Le pattern du registre est stable entre les contenus d'une même route et
+    // permet de borner la reprise Safari sans stocker l'identifiant de l'URL.
+    cached = lazy(() => entry.loader({ routeKey: entry.path }));
     lazyComponentCache.set(entry.path, cached);
   }
   return cached;
 };
 
-// Wrapper qui injecte `key={location.pathname}` sur le composant lazy. Sans ça,
+// Wrapper qui injecte par défaut `key={location.pathname}` sur le composant lazy. Sans ça,
 // quand l'utilisateur navigue entre deux URLs matchant le même Route pattern
 // (ex. /movie/abc → /movie/xyz), React Router réutilise l'instance composant
 // avec juste les params updated. Les useState de la page (movie, cast, crew,
@@ -529,11 +542,13 @@ const getCachedLazy = (entry: RouteEntry) => {
 const RouteLazyContent: React.FC<{
   Lazy: React.LazyExoticComponent<React.ComponentType<unknown>>;
   fallback: React.ReactNode;
-}> = ({ Lazy, fallback }) => {
+  getComponentKey?: (pathname: string) => string;
+}> = ({ Lazy, fallback, getComponentKey }) => {
   const location = useLocation();
+  const componentKey = getComponentKey?.(location.pathname) ?? location.pathname;
   return (
     <DelayedSuspense fallback={fallback}>
-      <Lazy key={location.pathname} />
+      <Lazy key={componentKey} />
     </DelayedSuspense>
   );
 };
@@ -544,6 +559,7 @@ const renderRouteEntry = (entry: RouteEntry) => {
     <RouteLazyContent
       Lazy={Lazy}
       fallback={entry.fallback ?? <RouteProgressBar />}
+      getComponentKey={entry.getComponentKey}
     />
   );
   if (entry.guard === 'private') {
@@ -595,10 +611,6 @@ const PersistenceManager = () => {
     { type: null, id: null }
   );
 
-  // Store auth states in refs to avoid dependency issues
-  const discordAuth = React.useRef(localStorage.getItem('discord_auth') === 'true');
-  const googleAuth = React.useRef(localStorage.getItem('google_auth') === 'true');
-
   // Track user authentication changes
   useEffect(() => {
     const handleStorageChange = (e: StorageEvent | null) => {
@@ -615,10 +627,6 @@ const PersistenceManager = () => {
         e.key === 'access_code' ||
         e.key === 'access_code_expires' ||
         e.key === 'auth_token'; // Also watch for auth_token changes
-
-      // Update auth refs
-      discordAuth.current = localStorage.getItem('discord_auth') === 'true';
-      googleAuth.current = localStorage.getItem('google_auth') === 'true';
 
       // Check if user type has changed
       if (isAuthChange) {
@@ -706,11 +714,21 @@ const PersistenceManager = () => {
     });
     syncDiag.gateInitialState = isProfileDataLoadingRef.current;
 
-    // Initialize snapshot of current localStorage
+    // Ne pas installer la synchronisation avec un stockage absent, refusé ou
+    // illisible : un instantané partiel ne doit jamais devenir une base de sync.
+    // Le stockage en mémoire posé par index.html quand le navigateur refuse
+    // le vrai est vide à chaque visite : il ne doit rien envoyer au serveur.
+    if ((window as { __MOVIX_MEMORY_STORAGE__?: { localStorage?: boolean } }).__MOVIX_MEMORY_STORAGE__?.localStorage) return;
+    let storage: Storage;
     const prevValues = new Map<string, string | null>();
-    for (let i = 0; i < localStorage.length; i++) {
-      const k = localStorage.key(i);
-      if (k) prevValues.set(k, localStorage.getItem(k));
+    try {
+      storage = window.localStorage;
+      for (let i = 0; i < storage.length; i++) {
+        const k = storage.key(i);
+        if (k) prevValues.set(k, storage.getItem(k));
+      }
+    } catch {
+      return;
     }
 
     const prevValuesRefLocal = { current: prevValues } as { current: Map<string, string | null> };
@@ -736,6 +754,7 @@ const PersistenceManager = () => {
     })();
 
     debugAppLog('localStorage available:', isLocalStorageAvailable);
+    if (!isLocalStorageAvailable) return;
 
     const enqueueGeneralOp = (op: any) => {
       // Skip sync during profile data loading (but allow on watch routes)
@@ -1206,20 +1225,25 @@ const PersistenceManager = () => {
     // Past versions of this code attempted `localStorage.setItem = fn` and
     // accidentally seeded junk entries on Firefox users. Drop them once.
     for (const junkKey of ['setItem', 'removeItem', 'clear']) {
-      const v = localStorage.getItem(junkKey);
+      const v = storage.getItem(junkKey);
       if (v && v.startsWith('function')) {
-        originalRemoveItem.call(localStorage, junkKey);
+        storage.removeItem(junkKey);
         prevValuesRefLocal.current.delete(junkKey);
       }
     }
 
+    // Les méthodes natives sont appelées sur `this`, jamais sur le global
+    // `localStorage` relu à chaque appel : une extension peut remplacer
+    // `window.localStorage` par un objet à elle après l'installation de ce
+    // patch, puis rappeler la méthode avec le vrai Storage. La méthode native
+    // appelée sur cet objet lève « Illegal invocation » et la connexion
+    // Google plantait au clic (GlitchTip FRONTEND-F1, FRONTEND-F4).
     Storage.prototype.setItem = function (this: Storage, key: string, value: string) {
-      if (this !== localStorage) return originalSetItem.call(this, key, value);
-      if (!isLocalStorageAvailable) return;
+      if (this !== storage) return originalSetItem.call(this, key, value);
 
       syncDiag.setItemIntercepted++;
-      const oldVal = prevValuesRefLocal.current.get(key) ?? localStorage.getItem(key);
-      originalSetItem.call(localStorage, key, value);
+      const oldVal = prevValuesRefLocal.current.get(key) ?? this.getItem(key);
+      originalSetItem.call(this, key, value);
       prevValuesRefLocal.current.set(key, value);
 
       // Notify other tabs synchronously (cheap; deferred work happens in microtask).
@@ -1237,12 +1261,11 @@ const PersistenceManager = () => {
     } as any;
 
     Storage.prototype.removeItem = function (this: Storage, key: string) {
-      if (this !== localStorage) return originalRemoveItem.call(this, key);
-      if (!isLocalStorageAvailable) return;
+      if (this !== storage) return originalRemoveItem.call(this, key);
 
       syncDiag.removeItemIntercepted++;
       const oldVal = prevValuesRefLocal.current.get(key) ?? null;
-      originalRemoveItem.call(localStorage, key);
+      originalRemoveItem.call(this, key);
       prevValuesRefLocal.current.delete(key);
 
       // Notify other tabs synchronously.
@@ -1260,13 +1283,12 @@ const PersistenceManager = () => {
     } as any;
 
     Storage.prototype.clear = function (this: Storage) {
-      if (this !== localStorage) return originalClear.call(this);
-      if (!isLocalStorageAvailable) return;
+      if (this !== storage) return originalClear.call(this);
 
       // Snapshot keys (with their previous values) before wiping localStorage.
       const cleared: Array<{ key: string; oldVal: string | null }> = [];
       prevValuesRefLocal.current.forEach((v, k) => cleared.push({ key: k, oldVal: v }));
-      originalClear.call(localStorage);
+      originalClear.call(this);
 
       // Notify other tabs synchronously, even on forced clear.
       if (channel) {
@@ -1313,6 +1335,11 @@ const PersistenceManager = () => {
       if (isProfileDataLoadingRef.current) return;
       if ((window as unknown as { __forceClearInProgress?: boolean }).__forceClearInProgress) return;
 
+      const userInfo = getUserInfo();
+      if (!userInfo.type || !userInfo.profileId || !['oauth', 'bip39'].includes(userInfo.type)) return;
+      const authToken = readLocalStorage('auth_token');
+      if (!authToken) return;
+
       // Synchronously drain pendingDiffs FIRST. The microtask scheduled by
       // the wrapped setItem/removeItem may not have run yet on Firefox: its
       // unload sequencing can fire pagehide before the microtask checkpoint
@@ -1352,11 +1379,6 @@ const PersistenceManager = () => {
       }
       progressOpsMapRef.current.clear();
       if (!pending.length) return;
-
-      const userInfo = getUserInfo();
-      if (!userInfo.type || !userInfo.profileId || !['oauth', 'bip39'].includes(userInfo.type)) return;
-      const authToken = localStorage.getItem('auth_token');
-      if (!authToken) return;
 
       // Persist a recovery outbox to localStorage BEFORE the keepalive fetch.
       // fetch keepalive is best-effort: on Firefox the Authorization header
@@ -1486,18 +1508,21 @@ const PersistenceManager = () => {
 
   // Determine user type, ID, and profile ID (only oauth and bip39 users can sync)
   const getUserInfo = () => {
-    const profileId = localStorage.getItem('selected_profile_id');
-    const account = getResolvedAccountContext();
-
-    if (!account.userType) {
-      return { type: null, id: null, profileId: null };
+    try {
+      const profileId = localStorage.getItem('selected_profile_id');
+      const account = getResolvedAccountContext();
+      if (account.userType) {
+        return {
+          type: account.userType,
+          id: account.userId,
+          profileId,
+        };
+      }
+    } catch {
+      // Ne pas synchroniser avec une identité partielle quand Firefox ferme
+      // le stockage pendant pagehide/visibilitychange.
     }
-
-    return {
-      type: account.userType,
-      id: account.userId,
-      profileId,
-    };
+    return { type: null, id: null, profileId: null };
   };
 
   // Guest UUID generation removed - no sync for guests
@@ -1563,7 +1588,7 @@ const DefaultProfileNudge: React.FC = () => {
   useEffect(() => {
     if (!isDefault || dismissed) { setVisible(false); return; }
     // Don't show if already dismissed
-    if (sessionStorage.getItem('profile_nudge_dismissed')) { return; }
+    if (readSessionStorage('profile_nudge_dismissed')) { return; }
     const timer = setTimeout(() => setVisible(true), 2500);
     return () => clearTimeout(timer);
   }, [isDefault, dismissed]);
@@ -1571,7 +1596,7 @@ const DefaultProfileNudge: React.FC = () => {
   const handleDismiss = () => {
     setDismissed(true);
     setVisible(false);
-    sessionStorage.setItem('profile_nudge_dismissed', 'true');
+    try { sessionStorage.setItem('profile_nudge_dismissed', 'true'); } catch { /* Masqué pour ce montage. */ }
   };
 
   const handleCustomize = () => {
@@ -1642,14 +1667,14 @@ const ProfileGate: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const isOauthAuthorizeRoute = location.pathname.startsWith('/oauth/authorize');
 
   // Check if user is authenticated
-  const isDiscordAuth = localStorage.getItem('discord_auth') === 'true';
-  const isGoogleAuth = localStorage.getItem('google_auth') === 'true';
-  const isBip39Auth = localStorage.getItem('bip39_auth') === 'true';
-  const isVipUser = localStorage.getItem('is_vip') === 'true';
+  const isDiscordAuth = readLocalStorage('discord_auth') === 'true';
+  const isGoogleAuth = readLocalStorage('google_auth') === 'true';
+  const isBip39Auth = readLocalStorage('bip39_auth') === 'true';
+  const isVipUser = readLocalStorage('is_vip') === 'true';
 
   // Vérifier l'ancienne méthode d'authentification VIP (pour compatibilité)
   let isVipAuth = false;
-  const authStr = localStorage.getItem('auth');
+  const authStr = readLocalStorage('auth');
   if (authStr) {
     try {
       const authObj = JSON.parse(authStr);
@@ -1733,9 +1758,9 @@ const AppWithIntro: React.FC = () => {
   const isScreensaverDisabledRoute = isWatchRoute || location.pathname.startsWith('/live-tv');
 
   // Screensaver logic
-  const [screensaverEnabled, setScreensaverEnabled] = useState(() => localStorage.getItem('screensaver_enabled') === 'true');
+  const [screensaverEnabled, setScreensaverEnabled] = useState(() => readLocalStorage('screensaver_enabled') === 'true');
   const [screensaverTimeout, setScreensaverTimeout] = useState(() => {
-    const saved = localStorage.getItem('screensaver_timeout');
+    const saved = readLocalStorage('screensaver_timeout');
     return saved ? parseInt(saved, 10) : 60;
   });
 
@@ -1745,8 +1770,8 @@ const AppWithIntro: React.FC = () => {
   // Listen for settings changes from Profile page
   React.useEffect(() => {
     const handleSettingsChange = () => {
-      setScreensaverEnabled(localStorage.getItem('screensaver_enabled') === 'true');
-      const t = localStorage.getItem('screensaver_timeout');
+      setScreensaverEnabled(readLocalStorage('screensaver_enabled') === 'true');
+      const t = readLocalStorage('screensaver_timeout');
       setScreensaverTimeout(t ? parseInt(t, 10) : 60);
     };
     window.addEventListener('screensaver_settings_changed', handleSettingsChange);

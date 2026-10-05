@@ -17,6 +17,8 @@ const initCycleTLS = require("cycletls");
 const diagnostics = require('./diagnostics');
 const { LruMap } = require("./lruMap");
 const { createProxyAgentPool } = require('./proxyAgentPool');
+const { createCoflixProxyPolicy } = require('./coflixProxyPolicy');
+const coflixProxyPolicy = createCoflixProxyPolicy();
 const { redis } = require("../config/redis");
 const {
   shouldRotateAnimeSamaResponse,
@@ -700,7 +702,10 @@ async function makeCoflixRequest(targetUrl, options = {}) {
     delete cleanHeaders[header.toLowerCase()];
   });
 
-  const { proxies, useSocks } = pickProxyscrapeCandidates();
+  const { proxies, useSocks, totalAvailable } = pickProxyscrapeCandidates(coflixProxyPolicy.isAvailable);
+  if (totalAvailable > 0 && proxies.length === 0) {
+    throw Object.assign(new Error('Proxys Coflix temporairement indisponibles'), { code: 'COFLIX_PROXIES_UNAVAILABLE' });
+  }
   let lastError = null;
 
   const releaseLease = (lease, response, discard = false) => {
@@ -761,6 +766,7 @@ async function makeCoflixRequest(targetUrl, options = {}) {
 
       // Les appels HTML sont entièrement consommés par Axios. Un éventuel flux garde son bail.
       releaseLease(lease, response);
+      coflixProxyPolicy.healthy(proxy, useSocks);
       return response;
     } catch (error) {
       // Les erreurs réseau retirent l'agent sans couper les autres demandes qui l'utilisent.
@@ -771,6 +777,7 @@ async function makeCoflixRequest(targetUrl, options = {}) {
 
       error.coflixUrl = cleanTargetUrl;
       error.coflixProxy = `${proxy.host}:${proxy.port}`;
+      coflixProxyPolicy.failed(proxy, useSocks, error);
 
       // 429 = rate-limit du site Coflix. Une autre IP ProxyScrape = bucket distinct
       // -> on rote. Le flag coupe le spam de log par titre si tout est limite.
@@ -859,7 +866,7 @@ const CHROME_JA3 =
 const CHROME_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
-function pickProxyscrapeCandidates() {
+function pickProxyscrapeCandidates(isAvailable) {
   const httpPool =
     HTTP_PROXIES.length > 0
       ? HTTP_PROXIES
@@ -888,9 +895,19 @@ function pickProxyscrapeCandidates() {
     };
   }
 
-  const selectedProxies = [...preferredPool.proxies]
-    .sort(() => Math.random() - 0.5)
-    .slice(0, MAX_PROXYSCRAPE_PROXY_ATTEMPTS);
+  const eligible = isAvailable
+    ? preferredPool.proxies.filter(proxy => isAvailable(proxy, preferredPool.useSocks))
+    : preferredPool.proxies;
+  // Tirage sans remise en O(nombre d'essais), sans copier/trier tout le pool.
+  const selectedProxies = [];
+  const swaps = new Map();
+  let remaining = eligible.length;
+  while (remaining > 0 && selectedProxies.length < MAX_PROXYSCRAPE_PROXY_ATTEMPTS) {
+    const choice = Math.floor(Math.random() * remaining);
+    selectedProxies.push(eligible[swaps.get(choice) ?? choice]);
+    remaining--;
+    swaps.set(choice, swaps.get(remaining) ?? remaining);
+  }
 
   return {
     proxies: selectedProxies,
@@ -1024,14 +1041,16 @@ async function makeLecteurVideoRequest(targetUrl, options = {}) {
 // CineStream (Cloudflare-fronted Next.js) via CycleTLS + ProxyScrape rotation,
 // like LecteurVideo/AnimeSama. Plain axios + CF Workers gets hammered with 525
 // (CF edge SSL errors under volume from one IP); a real Chrome JA3 over rotating
-// low-volume proxy IPs survives. Returns an axios-like {data,status,headers}
-// EVEN on 5xx/525 (never throws on HTTP status) so a flaky upstream degrades to
-// "film not found" instead of a thrown error — the caller's regex just finds no
-// tmdbid. Rotates proxies on 5xx/525/cf-block; returns 4xx immediately (a 400 on
-// an exotic-script title is deterministic, not worth burning another proxy).
+// low-volume proxy IPs survives. Les pannes restent des erreurs temporaires,
+// jamais des pages vides à interpréter comme « film introuvable ». Deux proxies
+// au maximum ; un 502 interrompt immédiatement la rotation. La pause partagée
+// entre workers est pilotée par routes/cinestream autour du scraping complet.
 async function makeCinestreamRequest(targetUrl, options = {}) {
   const { headers = {}, timeout = 15 } = options;
   const cleanTargetUrl = targetUrl.trim();
+  const unavailable = (status) => Object.assign(new Error(
+    `CineStream temporairement indisponible${status ? ` (HTTP ${status})` : ''}`,
+  ), { code: 'CINESTREAM_UPSTREAM_UNAVAILABLE', httpStatus: 503 });
 
   const cycleHeaders = {
     Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -1041,13 +1060,7 @@ async function makeCinestreamRequest(targetUrl, options = {}) {
     ...headers,
   };
 
-  const isCfBlock = (status, body) =>
-    status === 403 &&
-    typeof body === "string" &&
-    (body.includes("cf-wrapper") || body.includes("cloudflare"));
-  // 5xx (incl. Cloudflare 520-527 origin/SSL errors) + cf-block -> rotate proxy.
-  const shouldRotate = (status, body) =>
-    (status >= 500 && status < 600) || isCfBlock(status, body);
+  const isUsable = (status) => (status >= 200 && status < 300) || status === 400 || status === 404;
 
   const cycleTLS = await getCycleTLS();
   const asAxiosLike = (resp) => ({
@@ -1065,13 +1078,13 @@ async function makeCinestreamRequest(targetUrl, options = {}) {
       { body: "", ja3: CHROME_JA3, userAgent: CHROME_UA, headers: cycleHeaders, timeout },
       "get",
     );
+    if (!isUsable(resp.status)) throw unavailable(resp.status);
     return asAxiosLike(resp);
   }
 
   let lastResult = null;
-  let lastError = null;
 
-  for (let i = 0; i < proxies.length; i++) {
+  for (let i = 0; i < Math.min(proxies.length, 2); i++) {
     const proxy = proxies[i];
     const auth = proxy.auth ? `${proxy.auth}@` : "";
     const proxyUrl = useSocks
@@ -1085,20 +1098,18 @@ async function makeCinestreamRequest(targetUrl, options = {}) {
         "get",
       );
       const result = asAxiosLike(resp);
-      if (shouldRotate(result.status, result.data)) {
+      if (result.status === 502) throw unavailable(result.status);
+      if (!isUsable(result.status)) {
         lastResult = result;
         continue;
       }
-      return result; // 2xx success, or a definitive 4xx
+      return result;
     } catch (err) {
-      lastError = err;
+      if (err.code === 'CINESTREAM_UPSTREAM_UNAVAILABLE') throw err;
     }
   }
 
-  // All proxies 5xx/cf-block or errored: hand back the last response so the
-  // caller parses (and quietly finds nothing) instead of throwing.
-  if (lastResult) return lastResult;
-  throw lastError || new Error("[CINESTREAM] Tous les proxies ont echoue");
+  throw unavailable(lastResult?.status);
 }
 
 // 1jour1film (Dooplay theme, Cloudflare-fronted) via CycleTLS + ProxyScrape
@@ -1298,14 +1309,12 @@ async function make1j1fRequest(targetUrl, options = {}) {
   throw lastError || new Error("[1J1F] Tous les relais et proxies ont echoue");
 }
 
-// Cpasmal (DLE, Cloudflare-fronted) via CycleTLS + ProxyScrape rotation.
-// Same mechanism as make1j1fRequest: a real Chrome JA3 over rotating low-volume
-// IPs beats the Cloudflare bot-challenge that plain axios + datacenter proxies
-// hit (every GET/POST 403'd). Supports POST (DLE search form) and GET (detail /
-// getxfield / Season.php pages). Caller supplies Referer/Origin/Content-Type in
-// `headers`. timeout is in SECONDS (CycleTLS). Returns axios-like {data,status,headers}.
+// Cpasmal via CycleTLS : SOCKS5 dédiés en priorité, puis pool partagé en repli.
+// Les IP HTTP datacenter peuvent être refusées même avec le JA3 Chrome.
+// timeout est en secondes ; disableRedirect permet de lire les liens /episode.
+const cpasmalProxyCooldowns = new Map();
 async function makeCpasmalRequest(targetUrl, options = {}) {
-  const { headers = {}, timeout = 15, method = "get", body = "" } = options;
+  const { headers = {}, timeout = 15, method = "get", body = "", disableRedirect = false } = options;
   const cleanTargetUrl = targetUrl.trim();
   const lowerMethod = String(method).toLowerCase();
 
@@ -1315,21 +1324,27 @@ async function makeCpasmalRequest(targetUrl, options = {}) {
     ...headers,
   };
 
-  const isCfBlock = (status, b) =>
-    (status === 403 || status === 503) &&
-    typeof b === "string" &&
-    (b.includes("cf-wrapper") ||
-      b.includes("Just a moment") ||
-      b.includes("cloudflare"));
-  const shouldRotate = (status, b) =>
-    (status >= 500 && status < 600) || isCfBlock(status, b);
+  // Un proxy peut renvoyer un simple "Forbidden", sans HTML Cloudflare.
+  const shouldRotate = (status) =>
+    [0, 403, 407, 408, 425, 429].includes(status) || (status >= 500 && status < 600);
 
   const cycleTLS = await getCycleTLS();
-  const asAxiosLike = (resp) => ({
-    data: typeof resp.body === "string" ? resp.body : JSON.stringify(resp.body),
-    status: resp.status,
-    headers: resp.headers || {},
-  });
+  const target = new URL(cleanTargetUrl);
+  for (const [key, until] of cpasmalProxyCooldowns) if (until <= Date.now()) cpasmalProxyCooldowns.delete(key);
+  const attempts = [];
+  const asAxiosLike = (resp, proxyUrl) => {
+    const proxy = proxyUrl ? new URL(proxyUrl) : null;
+    return {
+      data: typeof resp.body === "string" ? resp.body : JSON.stringify(resp.body),
+      status: resp.status,
+      headers: resp.headers || {},
+      // Diagnostic interne sans identifiants de proxy ni jetons de querystring.
+      cpasmalProxy: proxy ? `${proxy.protocol}//${proxy.host}` : 'direct',
+      cpasmalUrl: `${target.origin}${target.pathname}`,
+      cpasmalAttempts: attempts.length,
+      cpasmalStatuses: attempts.slice(),
+    };
+  };
 
   const doRequest = (proxyUrl) =>
     cycleTLS(
@@ -1340,40 +1355,61 @@ async function makeCpasmalRequest(targetUrl, options = {}) {
         userAgent: CHROME_UA,
         headers: cycleHeaders,
         timeout,
+        disableRedirect,
         ...(proxyUrl ? { proxy: proxyUrl } : {}),
       },
       lowerMethod,
     );
 
   const { proxies, useSocks } = pickProxyscrapeCandidates();
+  const dedicated = [...DEDICATED_SOCKS5_PROXIES]
+    .sort(() => Math.random() - 0.5)
+    .slice(0, MAX_PROXYSCRAPE_PROXY_ATTEMPTS);
+  const candidates = [
+    ...dedicated.map(proxy => ({ proxy, socks: true })),
+    ...(proxies || []).map(proxy => ({ proxy, socks: useSocks })),
+  ];
 
   // No proxy pool -> single direct CycleTLS attempt.
-  if (!proxies || proxies.length === 0) {
-    return asAxiosLike(await doRequest(null));
+  if (candidates.length === 0) {
+    const response = await doRequest(null);
+    attempts.push(response.status);
+    return asAxiosLike(response, null);
   }
 
   let lastResult = null;
   let lastError = null;
-  for (let i = 0; i < proxies.length; i++) {
-    const proxy = proxies[i];
+  const attempted = new Set();
+  for (const { proxy, socks } of candidates) {
     const auth = proxy.auth ? `${proxy.auth}@` : "";
-    const proxyUrl = useSocks
+    const proxyUrl = socks
       ? `socks5h://${auth}${proxy.host}:${proxy.port}`
       : `http://${auth}${proxy.host}:${proxy.port}`;
+    if (attempted.has(proxyUrl)) continue;
+    const cooldownKey = `${target.hostname}:${proxyUrl}`;
+    if ((cpasmalProxyCooldowns.get(cooldownKey) || 0) > Date.now()) continue;
+    attempted.add(proxyUrl);
     try {
-      const result = asAxiosLike(await doRequest(proxyUrl));
-      if (shouldRotate(result.status, result.data)) {
+      const response = await doRequest(proxyUrl);
+      attempts.push(response.status);
+      const result = asAxiosLike(response, proxyUrl);
+      if (shouldRotate(result.status)) {
+        cpasmalProxyCooldowns.set(cooldownKey, Date.now() + 60000);
+        while (cpasmalProxyCooldowns.size > 500) cpasmalProxyCooldowns.delete(cpasmalProxyCooldowns.keys().next().value);
         lastResult = result;
         continue;
       }
       return result; // 2xx success, or a definitive 4xx
     } catch (err) {
+      attempts.push(0);
+      cpasmalProxyCooldowns.set(cooldownKey, Date.now() + 30000);
+      while (cpasmalProxyCooldowns.size > 500) cpasmalProxyCooldowns.delete(cpasmalProxyCooldowns.keys().next().value);
       lastError = err;
     }
   }
 
   if (lastResult) return lastResult;
-  throw lastError || new Error("[CPASMAL] Tous les proxies ont echoue");
+  throw lastError || Object.assign(new Error('[CPASMAL] Proxies temporairement indisponibles'), { code: 'CPASMAL_PROXY_COOLDOWN' });
 }
 
 // Fonction AnimeSama avec CycleTLS (cloudscraper-style : JA3 Chrome pour bypass Cloudflare).

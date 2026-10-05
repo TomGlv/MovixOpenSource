@@ -13,6 +13,7 @@ import ShinyText from '../components/ui/shiny-text';
 import { SquareBackground } from '../components/ui/square-background';
 import { getVipGift, unsealVipGift, VipGift } from '../services/vipDonationsService';
 import { TURNSTILE_SITE_KEY, getVipDurationLabel } from '../utils/vipDonationsUi';
+import { copyText } from '../utils/clipboard';
 
 const VipGiftPage: React.FC = () => {
   const { giftToken } = useParams<{ giftToken: string }>();
@@ -59,10 +60,9 @@ const VipGiftPage: React.FC = () => {
       return;
     }
 
-    try {
-      await navigator.clipboard.writeText(gift.vipKey);
+    if (await copyText(gift.vipKey)) {
       toast.success(t('vipDonations.common.copyVipKeySuccess'));
-    } catch {
+    } else {
       toast.error(t('vipDonations.common.copyFailed'));
     }
   };
@@ -129,8 +129,8 @@ const VipGiftPage: React.FC = () => {
       className="min-h-screen bg-black text-white"
     >
       <div className="container mx-auto px-4 py-8 sm:px-6 sm:py-12 relative z-10">
-        <Link to="/vip" className="inline-flex items-center text-white/50 hover:text-white transition-colors mb-8">
-          <ArrowLeft className="w-5 h-5 mr-2" />
+        <Link to="/vip" className="inline-flex items-center text-white/50 hover:text-white transition-colors mb-8 group/icon">
+          <ArrowLeft className="w-5 h-5 mr-2 text-white opacity-50 group-hover/icon:opacity-100 transition-[color,opacity]" />
           {t('vipDonations.gift.backVip')}
         </Link>
 
@@ -254,9 +254,9 @@ const VipGiftPage: React.FC = () => {
                       <button
                         type="button"
                         onClick={handleCopyKey}
-                        className="rounded-2xl border border-white/10 p-3 text-white/60 transition-colors hover:border-white/20 hover:text-white"
+                        className="rounded-2xl border border-white/10 p-3 text-white/60 transition-colors hover:border-white/20 hover:text-white group/icon"
                       >
-                        <Copy className="h-4 w-4" />
+                        <Copy className="h-4 w-4 text-white opacity-60 group-hover/icon:opacity-100 transition-[color,opacity]" />
                       </button>
                     </div>
                   </div>

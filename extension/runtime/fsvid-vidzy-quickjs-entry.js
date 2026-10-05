@@ -269,6 +269,8 @@ export function createBootstrap(embedUrl) {
         if (property === 'getAttribute') return function (attr) { return attr === 'src' ? '' : 'true'; };
         if (property === 'hasAttribute') return function () { return true; };
         if (property === 'referrer') return ${safeEmbedOrigin};
+        // Le lecteur mesure un div \`width:1in\` : 96 px CSS dans un vrai navigateur.
+        if (property === 'offsetWidth' || property === 'offsetHeight' || property === 'clientWidth' || property === 'clientHeight') return 96;
         if (property === 'then') return undefined;
         if (property === Symbol.toPrimitive) return function () { return ''; };
         return __movixLooseObject;

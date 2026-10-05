@@ -3,6 +3,7 @@ import { useLocation } from 'react-router-dom';
 import { checkVipStatus, isUserVip } from '../utils/vipUtils';
 import { getAdPopupMode, subscribeToAdPopupModeChanges } from '../utils/adPopupMode';
 import { SCRIPT_AD_MODE_ENABLED, loadAdScript } from '../utils/adScriptMode';
+import { readLocalStorage } from '../utils/browserStorage';
 
 
 interface AdFreePopupContextType {
@@ -55,7 +56,7 @@ export const AdFreePopupProvider: React.FC<{ children: React.ReactNode }> = ({ c
     // provider. On relit donc l'Ã©tat, puis on rejoint sa requÃªte en cours afin
     // de ne jamais rester bloquÃ© avec la valeur initiale aprÃ¨s une connexion.
     syncVipStatus();
-    if (localStorage.getItem('access_code')) {
+    if (readLocalStorage('access_code')) {
       void checkVipStatus().then((vip) => {
         if (mounted) setIsVip(vip);
       });
@@ -188,7 +189,13 @@ export const AdFreePopupProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
   const resetVipStatus = useCallback(() => {
     // Don't reset if localStorage has permanent VIP status
-    if (localStorage.getItem('is_vip') !== 'true') {
+    let persistentVip: string | null;
+    try {
+      persistentVip = localStorage.getItem('is_vip');
+    } catch {
+      return;
+    }
+    if (persistentVip !== 'true') {
       setIsVip(false);
       console.log('[AdFreePopupContext] VIP status reset.');
     }

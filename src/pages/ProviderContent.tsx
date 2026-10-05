@@ -278,6 +278,41 @@ const sliderStyles = `
   background: rgba(255, 255, 255, 0.15);
 }
 
+@media (max-width: 767px) {
+  .provider-nav {
+    flex-wrap: wrap;
+    align-items: stretch;
+    gap: 0.5rem;
+    padding: 0.75rem 1rem;
+  }
+
+  .provider-nav > span {
+    flex: 0 0 100%;
+    min-width: 0;
+    margin-right: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .provider-tab {
+    flex: 1 1 calc(50% - 0.25rem);
+    min-width: 0;
+    min-height: 44px;
+    justify-content: center;
+    padding: 0.65rem 0.5rem;
+    gap: 0.35rem;
+    white-space: nowrap;
+  }
+
+  .provider-tab svg {
+    flex-shrink: 0;
+  }
+
+  .provider-tab svg:last-child {
+    width: 14px;
+    height: 14px;
+  }
+}
+
 /* See all button */
 .see-all-btn {
   display: inline-flex;

@@ -128,6 +128,8 @@ const AdFreePlayerAds: React.FC<AdFreePlayerAdsProps> = ({
     previousHeightRef.current = null;
     const nextHeight = parseFloat(getComputedStyle(dialog).height);
     heightAnimationRef.current?.cancel();
+    heightAnimationRef.current = null;
+    if (typeof dialog.animate !== 'function') return;
     heightAnimationRef.current = dialog.animate(
       [{ height: `${previousHeight}px` }, { height: `${nextHeight}px` }],
       { duration: 250, easing: 'cubic-bezier(0.23, 1, 0.32, 1)' },
@@ -440,9 +442,9 @@ const AdFreePlayerAds: React.FC<AdFreePlayerAdsProps> = ({
           {hasClicked && (
             <DialogPrimitive.Close
               onClick={handleClose}
-              className="absolute right-4 top-4 rounded-full p-1.5 text-white/50 transition-all duration-200 hover:bg-white/10 hover:text-white focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+              className="absolute right-4 top-4 rounded-full p-1.5 text-white/50 transition-all duration-200 hover:bg-white/10 hover:text-white focus:outline-none focus:ring-2 focus:ring-blue-500/50 group/icon"
             >
-              <X className="h-4 w-4" />
+              <X className="h-4 w-4 text-white opacity-50 group-hover/icon:opacity-100 transition-[color,opacity]" />
               <span className="sr-only">{t("common.close")}</span>
             </DialogPrimitive.Close>
           )}

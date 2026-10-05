@@ -16,6 +16,7 @@ import LiveTVPlayer from '../components/LiveTVPlayer';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
 import { Input } from '../components/ui/input';
+import { Skeleton } from '../components/ui/Skeleton';
 import { useWrappedTracker } from '../hooks/useWrappedTracker';
 import AdFreePlayerAds from '../components/AdFreePlayerAds';
 import { isUserVip } from '../utils/authUtils';
@@ -295,7 +296,7 @@ const FavoriteInlineButton: React.FC<FavoriteInlineButtonProps> = ({
         onClick={onToggle}
         whileTap={{ scale: 0.72 }}
         className={cn(
-          'flex items-center justify-center rounded-full transition-all duration-200',
+          'group/icon flex items-center justify-center rounded-full transition-all duration-200',
           active
             ? 'bg-yellow-500/15 text-yellow-400'
             : 'bg-white/[0.04] text-white/35 hover:bg-white/[0.08] hover:text-white/70',
@@ -309,7 +310,11 @@ const FavoriteInlineButton: React.FC<FavoriteInlineButtonProps> = ({
           transition={{ type: 'spring', stiffness: 500, damping: 15 }}
         >
           <Star
-            className={cn('w-3.5 h-3.5 transition-colors duration-150', iconClassName)}
+            className={cn(
+              'w-3.5 h-3.5 transition-[color,opacity] duration-150',
+              active ? 'text-yellow-400' : 'text-white opacity-35 group-hover/icon:opacity-70',
+              iconClassName,
+            )}
             fill={active ? 'currentColor' : 'none'}
           />
         </motion.div>
@@ -1355,16 +1360,32 @@ const LiveTV: React.FC = () => {
   };
 
   // Skeleton loader component
-  const ChannelSkeleton = () => (
-    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3">
-      {Array.from({ length: 18 }).map((_, i) => (
-        <div key={i} className="animate-pulse">
-          <div className="media-aspect-video rounded-xl bg-white/5" />
-          <div className="mt-2 h-3 w-3/4 rounded bg-white/5" />
-        </div>
-      ))}
-    </div>
-  );
+  const ChannelSkeleton = () => {
+    const isEvent = selectedCatalog.startsWith('matches_') || selectedCatalog.startsWith('streamed_');
+    const isNameOnly = isEvent || selectedCatalog.startsWith('northlive_');
+    const landscape = selectedSource === 'iptv' || isNameOnly;
+    return (
+      <div className={channelGridClassName} aria-hidden="true">
+        {Array.from({ length: 18 }, (_, index) => (
+          <div key={index} className={cn('relative rounded-xl overflow-hidden border border-white/[0.04] bg-white/[0.02]', landscape ? 'media-aspect-video' : 'media-aspect-poster')}>
+            <div className="absolute inset-0"><Skeleton height="100%" className="!rounded-none" /></div>
+            <div className="absolute top-2 left-2"><Skeleton width={42} height={18} baseColor="#2a2a2a" /></div>
+            <div className="absolute top-2 right-2"><Skeleton variant="circle" width={28} height={28} baseColor="#2a2a2a" /></div>
+            {isNameOnly ? (
+              <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 px-3">
+                <Skeleton width={28} height={28} baseColor="#2a2a2a" />
+                <Skeleton width="80%" height={16} containerClassName="w-full flex justify-center" baseColor="#2a2a2a" />
+              </div>
+            ) : (
+              <div className={cn('absolute inset-x-0 bottom-0', selectedSource === 'iptv' ? 'p-2 pt-6' : 'p-2.5 pt-8')}>
+                <Skeleton width="75%" height={16} baseColor="#2a2a2a" />
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    );
+  };
 
   // Filtered IPTV streams for search
   const filteredIptvStreams = useMemo(
@@ -1625,7 +1646,7 @@ const LiveTV: React.FC = () => {
                    <h3 className="text-xs font-medium text-white/60 line-clamp-2 leading-tight">{channel.name}</h3>
                    {isVavoo && channel._vavooVariants && channel._vavooVariants.length > 1 && vavooServers.length > 0 && (
                      <div className="mt-1.5 flex max-w-full items-center gap-1 rounded-full border border-white/[0.06] bg-white/[0.03] px-2 py-1 text-[9px] font-medium text-white/35">
-                       <Wifi className="h-3 w-3 shrink-0" />
+                       <Wifi className="h-3 w-3 shrink-0 text-white opacity-35" />
                        <span className="truncate">
                          {t('liveTV.vavooServers')}: {vavooServers.join(' · ')}
                        </span>
@@ -1768,7 +1789,7 @@ const LiveTV: React.FC = () => {
                   </Link>
                   <Link to="/app">
                     <Button size="sm" variant="outline" className="h-7 gap-1.5 border-white/15 px-3 text-xs text-white/70 hover:bg-white/5">
-                      <Smartphone className="w-3.5 h-3.5" />
+                      <Smartphone className="w-3.5 h-3.5 text-white opacity-70" />
                       {t('liveTV.mobileApp')}
                     </Button>
                   </Link>
@@ -1840,7 +1861,7 @@ const LiveTV: React.FC = () => {
                 <div className="relative w-full sm:w-96" ref={iptvDropdownRef}>
                   {loadingIptvCategories ? (
                     <div className="flex items-center gap-3 h-10 px-4 bg-white/[0.03] border border-white/[0.06] rounded-lg text-white/40 text-sm">
-                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <Loader2 className="w-4 h-4 animate-spin text-white opacity-40" />
                       {t('common.loading')}
                     </div>
                   ) : (

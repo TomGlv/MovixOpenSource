@@ -24,6 +24,14 @@ ARG VITE_WATCHPARTY_API
 ARG VITE_PROXIES_EMBED_API
 ARG VITE_TURNSTILE_SITE_KEY
 ARG VITE_TURNSTILE_INVISIBLE_SITEKEY
+# Paires Turnstile supplémentaires (src/utils/turnstileKeys.ts) : groupes 2 et
+# 3 déclarés ici, à compléter sur le même modèle jusqu'à 10 si besoin.
+ARG VITE_TURNSTILE_DOMAINS_2
+ARG VITE_TURNSTILE_SITE_KEY_2
+ARG VITE_TURNSTILE_INVISIBLE_SITEKEY_2
+ARG VITE_TURNSTILE_DOMAINS_3
+ARG VITE_TURNSTILE_SITE_KEY_3
+ARG VITE_TURNSTILE_INVISIBLE_SITEKEY_3
 ARG VITE_VAPID_PUBLIC_KEY
 ARG VITE_SUPPORT_TELEGRAM_URL
 ARG VITE_APP_BUILD_ID
@@ -53,6 +61,12 @@ ENV VITE_MAIN_API=$VITE_MAIN_API \
     VITE_PROXIES_EMBED_API=$VITE_PROXIES_EMBED_API \
     VITE_TURNSTILE_SITE_KEY=$VITE_TURNSTILE_SITE_KEY \
     VITE_TURNSTILE_INVISIBLE_SITEKEY=$VITE_TURNSTILE_INVISIBLE_SITEKEY \
+    VITE_TURNSTILE_DOMAINS_2=$VITE_TURNSTILE_DOMAINS_2 \
+    VITE_TURNSTILE_SITE_KEY_2=$VITE_TURNSTILE_SITE_KEY_2 \
+    VITE_TURNSTILE_INVISIBLE_SITEKEY_2=$VITE_TURNSTILE_INVISIBLE_SITEKEY_2 \
+    VITE_TURNSTILE_DOMAINS_3=$VITE_TURNSTILE_DOMAINS_3 \
+    VITE_TURNSTILE_SITE_KEY_3=$VITE_TURNSTILE_SITE_KEY_3 \
+    VITE_TURNSTILE_INVISIBLE_SITEKEY_3=$VITE_TURNSTILE_INVISIBLE_SITEKEY_3 \
     VITE_VAPID_PUBLIC_KEY=$VITE_VAPID_PUBLIC_KEY \
     VITE_SUPPORT_TELEGRAM_URL=$VITE_SUPPORT_TELEGRAM_URL \
     VITE_APP_BUILD_ID=$VITE_APP_BUILD_ID \
@@ -105,7 +119,8 @@ FROM node:22-alpine AS runner
 WORKDIR /app
 
 ENV NODE_ENV=production \
-    PORT=3001
+    PORT=3001 \
+    ASSET_HISTORY_DIR=/app/asset-history
 
 COPY --from=production-dependencies --chown=node:node /app/node_modules ./node_modules
 # UID/GID de l'utilisateur node dans l'image officielle, sans résolution de nom.
@@ -115,7 +130,9 @@ COPY --from=builder --chown=node:node /app/package.json ./package.json
 COPY --from=builder --chown=node:node /app/server/package.json ./server/package.json
 COPY --from=builder --chown=node:node /app/server/index.js ./server/index.js
 COPY --from=builder --chown=node:node /app/server/gracefulShutdown.js ./server/gracefulShutdown.js
+COPY --from=builder --chown=node:node /app/server/asset-history.mjs ./server/asset-history.mjs
 COPY --from=builder --chown=node:node /app/functions/_lib/socialPreview.js ./functions/_lib/socialPreview.js
+RUN mkdir -p /app/asset-history && chown node:node /app/asset-history
 
 # Couche indépendante du JavaScript, réutilisable quand il change : les avatars
 # restent à /avatars/ sans être dupliqués dans dist pendant la compilation.

@@ -101,7 +101,11 @@ const EXTRACTORS = Object.freeze({
     vidzy: { path: '/api/extract-vidzy', pick: (data) => data?.m3u8Url },
     vidmoly: { path: '/api/extract-vidmoly', pick: (data) => data?.sourceUrl },
     sibnet: { path: '/api/extract-sibnet', pick: (data) => data?.sourceUrl },
-    uqload: { path: '/api/extract-uqload', pick: (data) => data?.data?.url || data?.url },
+    uqload: {
+        path: '/api/extract-uqload',
+        pick: (data) => data?.data?.url || data?.url,
+        subtitles: (data) => data?.data?.subtitles || data?.subtitles,
+    },
     doodstream: { path: '/api/extract-doodstream', pick: (data) => data?.url },
     lulustream: { path: '/api/extract-lulustream', pick: (data) => data?.url },
     veev: { path: '/api/extract-veev', pick: (data) => data?.url },
@@ -226,8 +230,37 @@ function notifyExtractionFailure(hoster, embedUrl, { kind, label }) {
 }
 
 /**
+ * Ne garde que des pistes de sous-titres bien formées (URL https, champs
+ * courts) : elles sont relayées telles quelles au navigateur.
+ */
+function sanitizeSubtitles(raw) {
+    if (!Array.isArray(raw)) return [];
+    const subtitles = [];
+    for (const item of raw) {
+        if (!item || typeof item !== 'object' || typeof item.url !== 'string') continue;
+        let parsed;
+        try {
+            parsed = new URL(item.url);
+        } catch {
+            continue;
+        }
+        if (parsed.protocol !== 'https:' || parsed.username || parsed.password) continue;
+        const lang = typeof item.lang === 'string' && /^[a-z]{2,3}$/i.test(item.lang) ? item.lang.toLowerCase() : 'und';
+        subtitles.push({
+            url: parsed.href,
+            label: typeof item.label === 'string' && item.label.trim() ? item.label.trim().slice(0, 80) : lang.toUpperCase(),
+            lang,
+            format: item.format === 'srt' ? 'srt' : 'vtt',
+            default: item.default === true,
+        });
+        if (subtitles.length >= 8) break;
+    }
+    return subtitles;
+}
+
+/**
  * Résout un lien embed en URL m3u8 signée.
- * @returns {Promise<{ m3u8Url: string, hoster: string } | null>}
+ * @returns {Promise<{ m3u8Url: string, hoster: string, subtitles?: Array } | null>}
  */
 async function extractEmbed(embedUrl, accessKey) {
     const hoster = detectHoster(embedUrl);
@@ -255,7 +288,10 @@ async function extractEmbed(embedUrl, accessKey) {
         });
 
         const m3u8Url = extractor.pick(response.data);
-        if (typeof m3u8Url === 'string' && m3u8Url) return { m3u8Url, hoster };
+        if (typeof m3u8Url === 'string' && m3u8Url) {
+            const subtitles = sanitizeSubtitles(extractor.subtitles?.(response.data));
+            return subtitles.length ? { m3u8Url, hoster, subtitles } : { m3u8Url, hoster };
+        }
 
         // 2xx sans flux : l'extracteur a répondu mais n'a rien trouvé dans la
         // page. Signe habituel d'un hébergeur qui a changé son gabarit.
@@ -350,7 +386,10 @@ async function extractLanguageMap(languageMap, options = {}) {
         languages[language] = Array.isArray(players)
             ? players.map((player, index) => {
                   const resolved = resolvedByKey.get(`${language}:${index}`);
-                  return resolved ? { ...player, m3u8Url: resolved.m3u8Url } : player;
+                  if (!resolved) return player;
+                  return resolved.subtitles
+                      ? { ...player, m3u8Url: resolved.m3u8Url, subtitles: resolved.subtitles }
+                      : { ...player, m3u8Url: resolved.m3u8Url };
               })
             : players;
     }

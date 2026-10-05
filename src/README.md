@@ -46,6 +46,7 @@ Les variables principales sont documentées dans `.env.example` :
 - `VITE_SUPPORT_TELEGRAM_URL`
 - `VITE_TURNSTILE_SITE_KEY`
 - `VITE_TURNSTILE_INVISIBLE_SITEKEY`
+- `VITE_TURNSTILE_DOMAINS_n`, `VITE_TURNSTILE_SITE_KEY_n` et `VITE_TURNSTILE_INVISIBLE_SITEKEY_n` (n de 2 à 10) : paires de widgets Turnstile supplémentaires au-delà de 10 domaines, choisies selon le domaine courant par `src/utils/turnstileKeys.ts`
 
 La normalisation des URLs runtime est centralisée dans `src/config/runtime.ts`.
 
@@ -112,9 +113,17 @@ Après une évolution des API JavaScript utilisées, des dépendances ou des cib
 
 `compat/legacy-dom-polyfills.js` complète les API DOM nécessaires avec AbortController/fetch, IntersectionObserver et ResizeObserver, uniquement dans la variante legacy. L'annulation de fetch émulée rejette la promesse mais ne peut pas interrompre physiquement la connexion réseau. Les scripts classiques intégrés à `index.html` restent écrits en ES5, car Vite ne les transpile pas.
 
-Le worker de Sync Pro est compilé séparément avec une cible de syntaxe Chrome 68 et ne reçoit pas les polyfills de la page. S'il échoue ou ne confirme pas son démarrage sous cinq secondes, WatchParty utilise localement la synchronisation classique. Le service worker `public/sw.js` est une autre sortie : il conserve son traitement existant, sans transpilation. Les hauteurs de WatchParty ont un repli `vh`, et les cartes de personnages et Live TV réservent leur ratio sans dépendre de `aspect-ratio`.
+Les workers sont compilés séparément avec une cible de syntaxe Chrome 68 et ne reçoivent pas les polyfills de la page. Si le worker de Sync Pro échoue ou ne confirme pas son démarrage sous cinq secondes, WatchParty utilise localement la synchronisation classique. Les hauteurs de WatchParty ont un repli `vh`, et les cartes de personnages et Live TV réservent leur ratio sans dépendre de `aspect-ratio`.
 
 Ces cibles de compilation ne garantissent pas à elles seules le fonctionnement complet sur une TV. La lecture dépend aussi des codecs, des API multimédias et des lecteurs tiers. La validation d'une ancienne version doit utiliser les fichiers du build de production sur le moteur concerné ; le serveur de développement Vite ne sert pas de bundle legacy.
+
+### Espacements sur les anciennes WebView Android
+
+`main.tsx` initialise `utils/flexGapSupport.ts`. Une mesure réelle détecte l'absence de `gap` en Flexbox ; l'User-Agent Android ne permet pas de la déduire. Sur ces seuls moteurs, le repli suit les éléments rendus, les états et les changements de largeur, puis ajoute les marges nécessaires. Les composants conservent leurs classes `gap-*` habituelles, et les grilles ne sont pas modifiées. Les carrousels utilisent `hooks/useFlexGapEmblaCarousel.ts` pour recalculer leurs positions lorsque ces marges changent.
+
+Ce repli privilégie un espacement utilisable sans réorganiser le DOM React. Les groupes avec retour à la ligne peuvent conserver une petite gouttière extérieure. Les groupes ayant des pseudo-éléments dans le flux ou des enfants `display: contents`, ainsi que les paires encadrées de deux marges automatiques, ne sont pas émulés intégralement.
+
+Les scénarios `node tests/flexGapLayout.browser.mjs`, `node tests/flexGap.browser.mjs` et `node tests/flexGapCarousel.browser.mjs` vérifient les dispositions, les vrais contrôles HLS/votes et le défilement du carrousel, sans serveur ni compte. Ils nécessitent les dépendances npm et Playwright/Chromium. `FLEX_GAP_LEGACY_CHROMIUM` permet de fournir un Chromium antérieur à 84 ; `FLEX_GAP_REPORT_DIR` conserve les mesures, captures et traces. Sans cet exécutable, consulter le rapport pour distinguer les contrôles modernes d'une éventuelle simulation.
 
 ### Conventions
 

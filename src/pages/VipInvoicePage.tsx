@@ -38,6 +38,7 @@ import {
   getVipStatusMeta
 } from '../utils/vipDonationsUi';
 import { rememberVipInvoice } from '../utils/vipInvoiceHistory';
+import { copyText } from '../utils/clipboard';
 
 const STATUS_TONE: Record<VipInvoice['status'], string> = {
   awaiting_payment: 'bg-yellow-500/15 text-yellow-200 border-yellow-400/35',
@@ -292,10 +293,9 @@ const VipInvoicePage: React.FC = () => {
   };
 
   const handleCopy = async (value: string, successMessage: string) => {
-    try {
-      await navigator.clipboard.writeText(value);
+    if (await copyText(value)) {
       toast.success(successMessage);
-    } catch {
+    } else {
       toast.error(t('vipDonations.common.copyFailed'));
     }
   };
@@ -375,8 +375,8 @@ const VipInvoicePage: React.FC = () => {
       className="min-h-screen bg-black text-white"
     >
       <div className="container mx-auto px-4 py-8 sm:px-6 sm:py-12 relative z-10">
-        <Link to="/vip/don" className="inline-flex items-center text-white/50 hover:text-white transition-colors mb-8">
-          <ArrowLeft className="w-5 h-5 mr-2" />
+        <Link to="/vip/don" className="inline-flex items-center text-white/50 hover:text-white transition-colors mb-8 group/icon">
+          <ArrowLeft className="w-5 h-5 mr-2 text-white opacity-50 group-hover/icon:opacity-100 transition-[color,opacity]" />
           {t('vipDonations.invoice.backVip')}
         </Link>
 
@@ -448,9 +448,9 @@ const VipInvoicePage: React.FC = () => {
                         <button
                           type="button"
                           onClick={() => handleCopy((invoice.amountCryptoExpected || 0).toFixed(8), t('vipDonations.common.copyAmountSuccess'))}
-                          className="rounded-2xl border border-white/10 p-2 text-white/50 transition-colors hover:border-white/20 hover:text-white"
+                          className="rounded-2xl border border-white/10 p-2 text-white/50 transition-colors hover:border-white/20 hover:text-white group/icon"
                         >
-                          <Copy className="h-4 w-4" />
+                          <Copy className="h-4 w-4 text-white opacity-50 group-hover/icon:opacity-100 transition-[color,opacity]" />
                         </button>
                       </div>
 
@@ -480,9 +480,9 @@ const VipInvoicePage: React.FC = () => {
                         <button
                           type="button"
                           onClick={() => handleCopy(invoice.paymentAddress || '', t('vipDonations.common.copyAddressSuccess'))}
-                          className="rounded-2xl border border-white/10 p-2 text-white/50 transition-colors hover:border-white/20 hover:text-white"
+                          className="rounded-2xl border border-white/10 p-2 text-white/50 transition-colors hover:border-white/20 hover:text-white group/icon"
                         >
-                          <Copy className="h-4 w-4" />
+                          <Copy className="h-4 w-4 text-white opacity-50 group-hover/icon:opacity-100 transition-[color,opacity]" />
                         </button>
                       </div>
                     </AnimatedBorderCard>
@@ -777,9 +777,9 @@ const VipInvoicePage: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => handleCopy(invoice.vipKey || '', t('vipDonations.common.copyVipKeySuccess'))}
-                      className="rounded-2xl border border-white/10 p-3 text-white/55 transition-colors hover:border-white/20 hover:text-white"
+                      className="rounded-2xl border border-white/10 p-3 text-white/55 transition-colors hover:border-white/20 hover:text-white group/icon"
                     >
-                      <Copy className="h-4 w-4" />
+                      <Copy className="h-4 w-4 text-white opacity-55 group-hover/icon:opacity-100 transition-[color,opacity]" />
                     </button>
                   </div>
                 </AnimatedBorderCard>
@@ -809,9 +809,9 @@ const VipInvoicePage: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => handleCopy(invoice.giftUrl || '', t('vipDonations.common.copyGiftUrlSuccess'))}
-                      className="rounded-2xl border border-white/10 p-3 text-white/55 transition-colors hover:border-white/20 hover:text-white"
+                      className="rounded-2xl border border-white/10 p-3 text-white/55 transition-colors hover:border-white/20 hover:text-white group/icon"
                     >
-                      <Copy className="h-4 w-4" />
+                      <Copy className="h-4 w-4 text-white opacity-55 group-hover/icon:opacity-100 transition-[color,opacity]" />
                     </button>
                   </div>
                 </AnimatedBorderCard>

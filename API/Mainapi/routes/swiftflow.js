@@ -17,15 +17,16 @@
  *
  * Cache — la limite upstream est 1000 req/min, donc on ne touche SwiftFlow
  * qu'une fois par titre par fenêtre TTL :
- *   - stale-while-revalidate sur le cache disque+mémoire partagé (stamp _ts) :
+ *   - stale-while-revalidate sur le cache disque+mémoire partagé (date du fichier) :
  *     frais -> servi ; périmé -> stale servi tout de suite + refresh en fond ;
- *     froid -> fetch inline (API JSON rapide). Tout est dédupliqué in-flight.
- *   - les négatifs (404) sont cachés aussi — la plupart des ids TMDB ne sont
- *     PAS sur SwiftFlow, c'est le gros du volume.
+ *     froid -> fetch en fond + réponse pending. Tout est dédupliqué in-flight.
+ *   - sans cache existant, les négatifs (404) sont cachés aussi — la plupart
+ *     des ids TMDB ne sont PAS sur SwiftFlow, c'est le gros du volume.
  *   - TTL : 1h pour tout (films, séries, négatifs) — un ajout ou un nouvel
  *     épisode devient visible en <= 1h.
- *   - une erreur upstream (timeout/5xx) n'est JAMAIS cachée : le stale reste
- *     servi et la requête suivante retente le refresh.
+ *   - avec un cache existant, un négatif ou une erreur upstream (404, page
+ *     nginx, timeout/5xx) conserve son contenu et renouvelle seulement la date
+ *     du fichier : la prochaine tentative attend la fenêtre TTL habituelle.
  *   - garde-fou: max ~900 appels upstream/min, au-delà on échoue vite (non
  *     caché) au lieu de brûler la limite.
  */
@@ -38,6 +39,8 @@ const {
   CACHE_DIR,
   getFromCacheNoExpiration,
   saveToCache,
+  touchCacheEntry,
+  shouldUpdateCache,
 } = require('../utils/cacheManager');
 const { redis } = require('../config/redis');
 const { respondWithResolvedSources } = require('../utils/embedExtraction');
@@ -84,8 +87,8 @@ async function takeUpstreamSlot() {
   }
 }
 
-// GET upstream. 404 = négatif définitif (cachable). Tout autre échec = throw,
-// jamais caché — le stale existant continue d'être servi.
+// GET upstream. 404 = négatif (cachable uniquement à froid). Tout autre échec
+// HTTP = throw ; fetchAndCache conserve le cache existant et reporte le refresh.
 async function fetchUpstream(route) {
   if (!(await takeUpstreamSlot())) throw new Error('budget upstream épuisé (>900 req/min)');
   const res = await axios.get(apiUrl(route), {
@@ -113,11 +116,22 @@ const fetchSeries = (id) =>
 // In-flight dédup: les requêtes concurrentes pour la même clé partagent le
 // même appel upstream (refresh de fond comme fetch froid).
 const inFlight = new Map();
-function fetchAndCache(key, fetcher) {
+function fetchAndCache(key, fetcher, cached = null) {
   if (inFlight.has(key)) return inFlight.get(key);
   const job = (async () => {
     try {
-      const fresh = await fetcher();
+      let fresh;
+      try {
+        fresh = await fetcher();
+      } catch (err) {
+        if (!cached) throw err;
+      }
+      if (cached && (!fresh || fresh.notFound)) {
+        // Ne réécrit ni les données ni _ts : seule la date du fichier avance,
+        // y compris pour les autres workers et après expiration du cache mémoire.
+        await touchCacheEntry(CACHE_DIR.SWIFTFLOW, key);
+        return cached;
+      }
       await saveToCache(CACHE_DIR.SWIFTFLOW, key, fresh);
       return fresh;
     } finally {
@@ -125,7 +139,7 @@ function fetchAndCache(key, fetcher) {
     }
   })();
   inFlight.set(key, job);
-  job.catch(() => {}); // refresh de fond raté: le prochain hit retentera
+  job.catch(() => {}); // sans cache, un échec de fond sera retenté au prochain hit
   return job;
 }
 
@@ -139,7 +153,9 @@ async function withCache(key, fetcher) {
       : cached.kind === 'movie'
         ? MOVIE_TTL_MS
         : TV_TTL_MS;
-    if (Date.now() - cached._ts >= ttl) fetchAndCache(key, fetcher); // stale: refresh en fond
+    if (await shouldUpdateCache(CACHE_DIR.SWIFTFLOW, key, ttl)) {
+      fetchAndCache(key, fetcher, cached); // stale: refresh en fond
+    }
     return cached; // frais OU stale: servi tout de suite
   }
   // Froid: fetch en fond (dédupliqué) et on répond "en cours" sans bloquer. Comme
@@ -322,7 +338,7 @@ router.get('/tv/:id/season/:season', async (req, res) => {
 // La faire transiter par un proxy la casserait (mauvais Referer) autant que ça
 // coûterait — ces fichiers pèsent plusieurs gigaoctets.
 
-const { verifyTurnstile } = require('../utils/turnstile');
+const { verifyTurnstile, turnstileSecretFor } = require('../utils/turnstile');
 const { verifyAccessKey } = require('../checkVip');
 
 // Domaine de sortie du CDN, quand il ne doit pas être celui que l'API annonce.
@@ -336,6 +352,10 @@ const { verifyAccessKey } = require('../checkVip');
 // devant le chemin du fichier. Absente, l'URL de l'API est rendue telle quelle.
 const CDN_OVERRIDE = (process.env.SWIFTFLOW_CDN_BASE_URL || '').trim();
 
+// Les fichiers servis par `hr_media.php` (ex. `/api/hr_media.php?id=hrm_…`)
+// n'existent que sur le domaine annoncé par l'API : on les rend tels quels.
+const NO_OVERRIDE_PATH = /\/hr_media(\.php)?$/i;
+
 /**
  * Réécrit l'origine d'une URL de fichier vers `SWIFTFLOW_CDN_BASE_URL`.
  *
@@ -348,6 +368,7 @@ function applyCdnOverride(fileUrl) {
   try {
     const base = new URL(CDN_OVERRIDE);
     const target = new URL(fileUrl);
+    if (NO_OVERRIDE_PATH.test(target.pathname)) return fileUrl;
     target.protocol = base.protocol;
     target.host = base.host;
     const prefix = base.pathname.replace(/\/+$/, '');
@@ -390,7 +411,7 @@ router.post('/mp4/resolve', async (req, res) => {
     const ip = req.headers['cf-connecting-ip']
       || req.headers['x-forwarded-for']?.split(',')[0]?.trim()
       || req.ip;
-    if (!(await verifyTurnstile(turnstileToken, ip))) {
+    if (!(await verifyTurnstile(turnstileToken, ip, turnstileSecretFor(req)))) {
       return res.status(403).json({ success: false, error: 'Vérification de sécurité échouée. Réessayez.' });
     }
   }

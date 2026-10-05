@@ -10,13 +10,19 @@ import { registerBlockDetection } from './services/blockDetection'
 import { initAnalytics } from './utils/analytics'
 import { installHttpCache } from './utils/httpCache'
 import { installSegmentedSeasons } from './utils/segmentedSeasons'
+import { installManualEpisodes } from './utils/manualEpisodes'
 import './index.css'
 import './styles/light-mode.css'
 import { initErrorTracking } from './utils/errorTracking'
+import { initFlexGapSupport } from './utils/flexGapSupport'
 
 // Suivi des crashs (GlitchTip) : posé avant tout le reste, les handlers globaux
 // ne voient que ce qui se passe après eux. Inactif en dev et sans DSN.
 initErrorTracking();
+
+// Détection avant React ; le repli commun suit ensuite les éléments rendus
+// sur les anciennes WebView Android, notamment celles des écrans embarqués.
+initFlexGapSupport();
 
 type MovixConsoleWarningWindow = Window & {
   __movixConsoleSafetyWarningStarted?: boolean;
@@ -175,6 +181,9 @@ installHttpCache(api)
 installSegmentedSeasons(axios)
 installSegmentedSeasons(api)
 
+// Compléments locaux aux épisodes absents de TMDB, communs aux fiches et lecteurs.
+installManualEpisodes(axios)
+
 // ---------------------------------------------------------------------------
 // Resilience patches — run before the app mounts.
 // ---------------------------------------------------------------------------
@@ -236,15 +245,34 @@ if (typeof Node === 'function' && Node.prototype) {
 // si l'utilisateur a coupé la mesure (Do Not Track / opt-out local).
 initAnalytics();
 
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <ErrorBoundary>
-      <HelmetProvider>
-        <App />
-      </HelmetProvider>
-    </ErrorBoundary>
-  </StrictMode>
-);
+const mountApp = () => {
+  let container = document.getElementById('root');
+  // Si le conteneur HTML attendu manque, le recréer pour permettre le montage.
+  // React ne peut pas monter sur null (erreur #299).
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'root';
+    document.body.appendChild(container);
+  }
+
+  createRoot(container).render(
+    <StrictMode>
+      <ErrorBoundary>
+        <HelmetProvider>
+          <App />
+        </HelmetProvider>
+      </ErrorBoundary>
+    </StrictMode>
+  );
+};
+
+// Les scripts injectés peuvent démarrer avant la fin de l'analyse du HTML.
+// Attendre évite aussi de créer un second #root avant celui d'index.html.
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', mountApp, { once: true });
+} else {
+  mountApp();
+}
 
 // Enregistrer le service worker et re-souscrire au push si la permission est déjà accordée
 if ('serviceWorker' in navigator) {

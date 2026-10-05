@@ -64,10 +64,28 @@ Le fichier `API/Mainapi/.env.example` est la référence complète. En pratique,
 - données : `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`
 - cache et coordination : `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`, `NUM_WORKERS`
 - scraping / proxy : `PROXY_SERVER_URL`, `IPTV_STREAM_PROXY`, `SOCKS5_PROXIES`, `HTTP_PROXIES`
-- anti-abuse / forms : `TURNSTILE_SECRET_KEY`, `TURNSTILE_INVISIBLE_SECRETKEY`
+- anti-abuse / forms : `TURNSTILE_SECRET_KEY`, `TURNSTILE_INVISIBLE_SECRETKEY`, puis `TURNSTILE_DOMAINS_n`, `TURNSTILE_SECRET_KEY_n` et `TURNSTILE_INVISIBLE_SECRETKEY_n` (n de 2 à 10) au-delà de 10 domaines : la clé suit l'`Origin` de la requête (`utils/turnstile.js`)
 - paiement / VIP : variables `VIP_*`, `BLOCKCYPHER_TOKEN`
 
 Certaines intégrations sont très spécifiques à des sources données, par exemple les cookies `DARKIWORLD_*`, `FSTREAM_LOGIN_*` ou `XTREAM_*`.
+
+`FSTREAM_BASE_URL` définit l'origine commune aux recherches, à la session et aux pages FrenchStream (`https://french-stream.net` par défaut). Les anciennes URLs `.one` en cache sont normalisées avant les appels, y compris les API d'épisodes : les POST de recherche ne doivent pas suivre une redirection 301 qui perdrait leur formulaire.
+
+FStream partage les liens bruts par saison ; `episode` sélectionne toujours l'épisode à résoudre. Les anciens caches par épisode sont repris progressivement. `FSTREAM_CACHE_REFRESH_MS` vaut 10 minutes par défaut : une requête déclenche l'actualisation lorsque les données sont périmées. Une recherche sans fiche validée attend également ce délai, tandis qu'une panne peut être retentée après une minute. Les liens utilisables sont conservés si l'actualisation échoue.
+
+FStream et Wiflix vérifient les titres français, originaux et alternatifs. Une année différente ou absente nécessite des indices supplémentaires : affiche TMDB identique, ou concordance du titre avec plusieurs acteurs/créateurs ou un synopsis corroboré. Le synopsis seul ne suffit pas. Pour les séries, l'année de la saison et celle de la série sont admises ; la saison demandée reste contrôlée. Les diagnostics indiquent les motifs d'acceptation ou de rejet des candidats.
+
+PurStream conserve les succès pendant six heures et les absences pendant cinq minutes. La date d'une tentative échouée est séparée de celle des données conservées. Un stream en 404 provoque une revalidation de son identifiant fournisseur. La source TV Direct a été retirée : ses anciens appels renvoient 410 sans contacter le fournisseur. `CLONE_LINKS_MISSING_RETRY_MS` espace les tentatives sur un fichier Uqload déclaré absent (24 heures par défaut).
+
+Cpasmal privilégie les proxys dédiés de `SOCKS5_PROXIES`, puis le pool partagé en repli. Ses journaux de refus indiquent le proxy et le chemin ciblés, sans identifiants ni paramètres de requête.
+
+Les proxys Cpasmal refusés sont écartés pendant une minute dans le worker (30 secondes sur erreur réseau). Le diagnostic d'un 403 indique également le nombre de tentatives et leurs statuts HTTP.
+
+Les routes Cpasmal film et épisode servent le cache immédiatement et l'actualisent en arrière-plan si nécessaire. Sans cache utilisable, elles renvoient `202` avec `pending: true`, `code: "retrieval_in_progress"` et `Retry-After: 2` : rappeler la même URL pour obtenir le résultat une fois la récupération terminée. Une panne amont donne ensuite un `503`, sans créer de faux cache « introuvable » ; les nouvelles tentatives sont espacées d'une minute.
+
+Redis partage désormais la récupération Cpasmal entre workers, les recherches positives pendant 40 minutes et les fiches série validées pendant 10 minutes. Les extractions sont limitées à trois lecteurs par épisode et douze requêtes par worker ; au-delà de trois lecteurs, le premier résultat est publié avant la liste complète. Une publication partielle conserve les lecteurs déjà utilisables. Sans Redis, le repli local reste limité à 64 récupérations simultanées ; les caches de recherche locaux sont bornés en nombre d'entrées et en octets.
+
+Les recherches Coflix positives sont partagées pendant 30 minutes et les échecs pendant une minute lorsque Redis est disponible. Chaque worker écarte pendant 30 secondes les proxys refusés ou en panne. Les prérequêtes CORS autorisées annoncent `Access-Control-Max-Age: 600` pour permettre leur réutilisation par le navigateur.
 
 ## Fichiers SQLite pour Darkino / DarkiWorld
 

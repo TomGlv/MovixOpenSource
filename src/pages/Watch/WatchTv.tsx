@@ -10,6 +10,7 @@ import { useAdFreePopup } from '../../context/AdFreePopupContext';
 import AdFreePlayerAds from '../../components/AdFreePlayerAds';
 import AdWaitingScreen from '@/components/AdWaitingScreen';
 import { getAdPopupMode } from '../../utils/adPopupMode';
+import { openInNewTab } from '../../utils/openInNewTab';
 import { extractM3u8FromEmbed, extractUqloadFile, extractVidzyM3u8, extractFsvidM3u8, registerServerResolvedSources, type M3u8Result } from '../../utils/extractM3u8';
 import type { SeekStreamingHlsSource } from '../../utils/seekStreamingCandidates';
 import { runExtractionPass } from '../../utils/runExtractionPass';
@@ -42,8 +43,10 @@ import {
   type SwiftfluxEntry,
   type SwiftfluxPlayback,
 } from '../../services/swiftfluxService';
+import { isHevcPlayable } from '../../utils/videoCodecSupport';
 import type { KisskhSource, KisskhSubtitleTrack } from '../../types/kisskh';
 import { markEpisodeHandoff } from '../../utils/playerFullscreenPersistence';
+import { readLocalStorage, writeLocalStorage } from '../../utils/browserStorage';
 const MAIN_API = import.meta.env.VITE_MAIN_API;
 const TMDB_API_KEY = import.meta.env.VITE_TMDB_API_KEY || '';
 
@@ -1196,43 +1199,53 @@ const WatchTv: React.FC = () => {
         });
 
         // Add TV show episode to continueWatching (if history is enabled)
-        if (localStorage.getItem('settings_disable_history') !== 'true') {
-          const continueWatching = JSON.parse(localStorage.getItem('continueWatching') || '{"movies": [], "tv": []}');
+        try {
+          const storage = window.localStorage;
+          if (storage.getItem('settings_disable_history') !== 'true') {
+            const continueWatching = JSON.parse(storage.getItem('continueWatching') ?? '{"movies": [], "tv": []}');
+            if (!continueWatching || typeof continueWatching !== 'object' || Array.isArray(continueWatching)) {
+              throw new Error('Invalid continueWatching data');
+            }
 
-          // Ensure structure exists
-          if (!continueWatching.movies) continueWatching.movies = [];
-          if (!continueWatching.tv) continueWatching.tv = [];
+            // Ensure structure exists
+            if (continueWatching.movies === undefined) continueWatching.movies = [];
+            else if (!Array.isArray(continueWatching.movies)) throw new Error('Invalid continueWatching movies');
+            if (continueWatching.tv === undefined) continueWatching.tv = [];
+            else if (!Array.isArray(continueWatching.tv)) throw new Error('Invalid continueWatching tv');
 
-          // Find existing TV show entry or create new one
-          const showIdInt = parseInt(id!);
-          const existingShow = continueWatching.tv.find((tvShow: any) => tvShow.id === showIdInt);
+            // Find existing TV show entry or create new one
+            const showIdInt = parseInt(id!);
+            const existingShow = continueWatching.tv.find((tvShow: any) => tvShow?.id === showIdInt);
 
-          if (existingShow) {
-            // Update existing show with current episode and timestamp
-            existingShow.currentEpisode = {
-              season: seasonNumber,
-              episode: episodeNumber
-            };
-            existingShow.lastAccessed = new Date().toISOString();
-            // Move to front of array
-            continueWatching.tv = continueWatching.tv.filter((tvShow: any) => tvShow.id !== showIdInt);
-            continueWatching.tv.unshift(existingShow);
-          } else {
-            // Create new TV show entry
-            const newTvEntry = {
-              id: showIdInt,
-              currentEpisode: {
+            if (existingShow) {
+              // Update existing show with current episode and timestamp
+              existingShow.currentEpisode = {
                 season: seasonNumber,
                 episode: episodeNumber
-              },
-              lastAccessed: new Date().toISOString()
-            };
-            continueWatching.tv.unshift(newTvEntry);
-          }
+              };
+              existingShow.lastAccessed = new Date().toISOString();
+              // Move to front of array
+              continueWatching.tv = continueWatching.tv.filter((tvShow: any) => tvShow?.id !== showIdInt);
+              continueWatching.tv.unshift(existingShow);
+            } else {
+              // Create new TV show entry
+              const newTvEntry = {
+                id: showIdInt,
+                currentEpisode: {
+                  season: seasonNumber,
+                  episode: episodeNumber
+                },
+                lastAccessed: new Date().toISOString()
+              };
+              continueWatching.tv.unshift(newTvEntry);
+            }
 
-          // Keep only last 20 TV shows
-          // continueWatching.tv = continueWatching.tv.slice(0, 20); // Removed limit
-          localStorage.setItem('continueWatching', JSON.stringify(continueWatching));
+            // Keep only last 20 TV shows
+            // continueWatching.tv = continueWatching.tv.slice(0, 20); // Removed limit
+            writeLocalStorage('continueWatching', JSON.stringify(continueWatching));
+          }
+        } catch {
+          // Un historique invalide ou indisponible ne doit pas bloquer la lecture.
         }
 
         // Get seasons information for episode navigation
@@ -1750,7 +1763,7 @@ const WatchTv: React.FC = () => {
         const fsvidSources: { url: string; label: string; category: string }[] = [];
 
         // Check if user is VIP (déclaré au niveau de la fonction pour être accessible partout)
-        const isVip = localStorage.getItem('is_vip') === 'true';
+        const isVip = readLocalStorage('is_vip') === 'true';
 
         if (fstreamResult && fstreamResult.success && fstreamResult.episodes) {
 
@@ -2208,7 +2221,7 @@ const WatchTv: React.FC = () => {
         // Par défaut (prefs vides) → ordre hardcodé historique, 100% rétrocompat.
         //
         // Legacy priority pour référence :
-        // nexus_hls > [embedseek custom promu] > nexus_file > bravo > mp4 > darkino >
+        // nexus_hls > [uqload custom promu] > nexus_file > bravo > mp4 > darkino >
         // omega (supervideo) > wiflix > viper > adFree (m3u8) > mp4 (dup) > fstream >
         // omega (deep fallback) > wiflix/viper (deep) > coflix (multi) > fstream (deep) >
         // custom > frembed > vox > vostfr
@@ -2224,12 +2237,10 @@ const WatchTv: React.FC = () => {
         console.log('AdFree M3U8 URL:', adFreeM3u8Url);
         console.log('Custom sources available:', customLinksResult.customLinks?.length || 0);
 
-        // Vérifier si un lien embedseek existe dans les custom sources.
-        // Legacy : embedseek custom était promu EN TÊTE (juste après nexus_hls).
-        // Nouveau : on le garde comme pré-check de la priorité pour préserver le comportement
-        // tel-quel tant que la priorité user n'a pas été configurée (rétrocompat 100%).
-        const embedseekLink = customLinksResult.customLinks?.find((link: string) =>
-          link.toLowerCase().includes('embedseek.com')
+        // Lien Uqload uploadé en custom : il est promu en tête (juste après
+        // nexus_hls) tant que la priorité user n'a pas été configurée.
+        const uqloadLink = customLinksResult.customLinks?.find((link: string) =>
+          link.toLowerCase().includes('uqload.')
         );
 
         // Helper : applique la config d'embed pour l'id choisi. Close sur toutes les
@@ -2461,7 +2472,8 @@ const WatchTv: React.FC = () => {
               return true;
             }
             case 'swiftflux': {
-              if (!swiftfluxResult.available) return false;
+              // HEVC illisible ici (PC sans décodeur) : son sans image, on saute.
+              if (!swiftfluxResult.available || !isHevcPlayable()) return false;
               // Aucune URL à poser : la porte d'entrée la demandera au serveur
               // une fois la pub vue et le Turnstile validé.
               setSelectedSource('swiftflux');
@@ -2527,10 +2539,10 @@ const WatchTv: React.FC = () => {
             }
             case 'custom': {
               if (!customLinksResult.customLinks || !customLinksResult.customLinks.length) return false;
-              // Legacy : embedseek est promu vers le haut ; sinon 1er custom link
-              const url = embedseekLink ?? customLinksResult.customLinks[0];
-              console.log(embedseekLink
-                ? `✅ Selecting EMBEDSEEK (Custom) — URL: ${url}`
+              // Uqload passe devant les autres liens custom ; sinon 1er custom link
+              const url = uqloadLink ?? customLinksResult.customLinks[0];
+              console.log(uqloadLink
+                ? `✅ Selecting UQLOAD (Custom) — URL: ${url}`
                 : '✅ Selecting CUSTOM as source');
               setSelectedSource('custom');
               setEmbedUrl(url);
@@ -2577,16 +2589,15 @@ const WatchTv: React.FC = () => {
           }
         };
 
-        // Legacy embedseek promotion : si embedseek existe ET nexus_hls n'est pas dispo,
-        // il était promu #2 dans l'ancien code (juste après nexus_hls). On applique cette
-        // règle avant le picker pour préserver la rétrocompat exacte.
+        // Promotion Uqload : si un lien Uqload custom existe ET nexus_hls n'est pas
+        // dispo, il est promu #2 (juste après nexus_hls), avant le picker.
         // Exceptions :
         //  - un lecteur Viblix (source `mp4`) passe devant : la promotion
         //    court-circuitait le picker et sélectionnait `custom` alors que `mp4`
         //    est classé bien avant `custom` dans l'ordre par défaut ;
         //  - si l'user a customisé l'ordre (pin ou drag), on laisse le picker.
-        let embedseekPromoted = false;
-        if (embedseekLink && finalHlsSources.length === 0 && fetchedMp4Sources.length === 0) {
+        let uqloadPromoted = false;
+        if (uqloadLink && finalHlsSources.length === 0 && fetchedMp4Sources.length === 0) {
           const prefs = getSourcePriorityPrefs();
           const userOrderIds = prefs.categories.moviesTv.sourceOrder.map((s) => s.id);
           const defaultOrderIds = buildDefaults().categories.moviesTv.sourceOrder.map((s) => s.id);
@@ -2595,11 +2606,11 @@ const WatchTv: React.FC = () => {
             || userOrderIds.some((id, i) => id !== defaultOrderIds[i]);
           if (!hasUserCustomized) {
             applyEmbedConfig('custom');
-            embedseekPromoted = true;
+            uqloadPromoted = true;
           }
         }
 
-        if (!embedseekPromoted) {
+        if (!uqloadPromoted) {
           // Priority-driven auto-select. Availability construite à partir des sources locales.
           const availability: SourceAvailability[] = [
             { id: 'nexus_hls', hasData: finalHlsSources.length > 0 },
@@ -3245,6 +3256,13 @@ const WatchTv: React.FC = () => {
     // soit franchie : l'erreur est attendue et ne doit pas déclencher de repli,
     // qui arracherait la source sous la porte encore ouverte.
     if (selectedSource === 'swiftflux' && !swiftfluxPlayback) return;
+    // Image non décodable (HEVC sans décodeur) : on laisse choisir une autre
+    // source plutôt que de rester sur un écran noir avec le son.
+    if (selectedSource === 'swiftflux' && !isHevcPlayable()) {
+      setSwiftfluxPlayback(null);
+      setShowEmbedQuality(true);
+      return;
+    }
 
     console.error(`Error playing HLS source: ${selectedSource}`);
 
@@ -3524,7 +3542,8 @@ const WatchTv: React.FC = () => {
 
   useEffect(() => {
     // On ne fait rien si VIP activé
-    if (import.meta.env.is_vip === 'true' || import.meta.env.is_vip === true || localStorage.getItem('is_vip') === 'true') {
+    const hasStoredVip = readLocalStorage('is_vip') === 'true';
+    if (import.meta.env.is_vip === 'true' || import.meta.env.is_vip === true || hasStoredVip) {
       console.log('?? VIP activé, popup désactivée');
       return;
     }
@@ -4533,7 +4552,7 @@ const WatchTv: React.FC = () => {
               const targetUrl = embedType === 'vostfr'
                 ? `https://vidlink.pro/tv/${id}/${seasonNumber}/${episodeNumber}`
                 : embedUrl || '';
-              window.open(targetUrl, '_blank', 'noopener');
+              openInNewTab(targetUrl);
             }}
             className="flex items-center gap-1 sm:gap-2 px-3 py-2 rounded-lg bg-gray-800/90 border border-gray-600 hover:bg-gray-700/90 text-white font-medium text-sm transition-all duration-200"
             title={t('watch.openInNewPage')}

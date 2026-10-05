@@ -4,6 +4,7 @@ import { usesServerExtraction } from './serverResolveRequest';
 import { detectHoster, toCanonicalHosterDomain } from './hosterRegistry';
 import { getSourcePriorityPrefs } from './sourcePriorityPrefs';
 import { sortHostersByPriority } from './sourceAutoSelect';
+import { registerEmbeddedSubtitles } from './embeddedSubtitles';
 import type { PriorityCategory, TopLevelSourceId, LanguageId } from '../types/sourcePriority';
 import {
   hasCompleteBulkCoverage,
@@ -55,6 +56,10 @@ export function registerServerResolvedSources(payload: unknown, depth = 0): void
     for (const field of EMBED_URL_FIELDS) {
       const embed = record[field];
       if (typeof embed === 'string' && embed) serverResolvedM3u8.set(embed, resolved);
+    }
+    // Sous-titres du lecteur hébergeur (Uqload), joints par la Main API.
+    if (Array.isArray(record.subtitles)) {
+      registerEmbeddedSubtitles(resolved, 'uqload', record.subtitles);
     }
   }
 
@@ -217,6 +222,8 @@ export interface M3u8Result {
   error?: string;
   reason?: 'deleted';
   fromCache?: boolean;
+  /** Pistes du lecteur de l'hébergeur (Uqload), via l'extension ou le userscript. */
+  subtitles?: unknown;
 }
 
 // Nouvelles interfaces pour le système d'extraction anticipée
@@ -388,8 +395,13 @@ export async function extractUqloadFile(
   // Normaliser tous TLDs uqload.* → uqload.is avant transmission (extension/serveur)
   const normalizedUrl = toCanonicalHosterDomain(uqloadUrl, 'uqload');
 
-  return tryExtensionFirst('uqload', normalizedUrl, () =>
+  const result = await tryExtensionFirst('uqload', normalizedUrl, () =>
     extractUqloadFileServer(normalizedUrl, uqloadUrl));
+  // Le lecteur retrouve les sous-titres Uqload par l'URL média qu'il reçoit.
+  if (result?.success && result.subtitles) {
+    registerEmbeddedSubtitles(result.m3u8Url || result.hlsUrl, 'uqload', result.subtitles);
+  }
+  return result;
 }
 
 async function extractUqloadFileServer(

@@ -11,7 +11,9 @@ const cheerio = require("cheerio");
 const path = require("path");
 const fsp = require("fs").promises;
 
-const { memoryCache } = require("../config/redis");
+const { memoryCache, redis } = require("../config/redis");
+const { reportRefreshFailure, refreshStep, withRefreshDiagnostics } = require("../utils/sourceRefreshTelemetry");
+const { createIdentityVerifier, parseSourceIdentity, searchTitles } = require("../utils/sourceIdentity");
 const {
   generateCacheKey,
   saveToCache,
@@ -185,11 +187,12 @@ async function searchWiflixMovie(title, baseUrl = WIFLIX_BASE_URL) {
       console.log(`[WIFLIX SEARCH] OK via proxy`);
     } catch (err) {
       console.log(`[WIFLIX SEARCH] Echec: ${err.message}`);
-      return { url: null, debugHtml: 'Erreur: service temporairement indisponible' };
+      refreshStep('search_error', { query: title }, err);
+      return { url: null, unavailable: true, debugHtml: 'Erreur: service temporairement indisponible' };
     }
 
     if (!responseBody || responseBody.includes("Un instant, s'il vous plait")) {
-      return { url: null, debugHtml: responseBody || 'Challenge Cloudflare non resolu' };
+      return { url: null, unavailable: true, debugHtml: responseBody || 'Challenge Cloudflare non resolu' };
     }
 
     const $ = cheerio.load(responseBody);
@@ -200,6 +203,7 @@ async function searchWiflixMovie(title, baseUrl = WIFLIX_BASE_URL) {
     if (movBlocks.length === 0) return { url: null, debugHtml: responseBody };
 
     let bestMatch = null;
+    const candidates = [];
     let bestSimilarity = 0;
     const { title: cleanSearchTitle, year: searchYear } = prepareWiflixTitle(title);
 
@@ -299,53 +303,25 @@ async function searchWiflixMovie(title, baseUrl = WIFLIX_BASE_URL) {
           : `${baseUrl}/${fullUrl}`;
       }
 
+      try { if (new URL(fullUrl).origin !== new URL(baseUrl).origin) return; } catch { return; }
+      if (similarity >= 0.5) candidates.push({ url: encodeURI(fullUrl), title: resultTitle, similarity });
       if (similarity >= 0.85 && similarity > bestSimilarity) {
         bestSimilarity = similarity;
         bestMatch = fullUrl ? encodeURI(fullUrl) : fullUrl;
       }
     });
 
-    return { url: bestMatch, debugHtml: bestMatch ? null : responseBody };
+    candidates.sort((a, b) => b.similarity - a.similarity);
+    refreshStep('search_candidates', { query: title, results: movBlocks.length, candidates: candidates.length });
+    return { url: bestMatch, candidates, debugHtml: candidates.length ? null : responseBody };
   } catch (error) {
     if (error.response?.status === 403) {
       console.error(
         `[WIFLIX SEARCH] 403 Forbidden pour "${title}" sur ${searchUrl}`,
       );
     }
-    return { url: null, debugHtml: 'Erreur: service temporairement indisponible' };
-  }
-}
-
-// === Release Date Extraction ===
-function extractWiflixReleaseDate($) {
-  try {
-    const releaseDateElement = $(
-      "body > div:first-child > div > div > div > div > div > article > div:first-child > div:nth-child(2) > ul > li:nth-child(2) > div:nth-child(2)",
-    );
-    if (releaseDateElement.length > 0) {
-      const dateText = releaseDateElement.text().trim();
-      const yearMatch = dateText.match(/(\d{4})/);
-      if (yearMatch) return parseInt(yearMatch[1]);
-    }
-
-    const fallbackSelectors = [
-      "div.mov-desc",
-      ".mov-desc",
-      'li:contains("Annee") + li',
-      'li:contains("Date") + li',
-    ];
-    for (const selector of fallbackSelectors) {
-      const element = $(selector);
-      if (element.length > 0) {
-        const text = element.text().trim();
-        const yearMatch = text.match(/(\d{4})/);
-        if (yearMatch) return parseInt(yearMatch[1]);
-      }
-    }
-    return null;
-  } catch (error) {
-    console.error("[WIFLIX] Erreur lors de l'extraction de la date:", error);
-    return null;
+    refreshStep('search_error', { query: title }, error);
+    return { url: null, unavailable: true, debugHtml: 'Erreur: service temporairement indisponible' };
   }
 }
 
@@ -372,7 +348,6 @@ async function extractWiflixPlayers(pageUrl) {
     }
     const $ = cheerio.load(rawHtml);
     const players = [];
-    const releaseYear = extractWiflixReleaseDate($);
 
     const episodeDivs = $(
       'div[class*="ep"][class*="vf"], div[class*="ep"][class*="vs"]',
@@ -469,7 +444,8 @@ async function extractWiflixPlayers(pageUrl) {
       });
     }
 
-    return { players, releaseYear, debugHtml: players.length === 0 ? rawHtml : null };
+    const identity = parseSourceIdentity(rawHtml);
+    return { players, releaseYear: identity.year, identity, debugHtml: players.length === 0 ? rawHtml : null };
   } catch (error) {
     return {
       players: [],
@@ -483,122 +459,72 @@ async function extractWiflixPlayers(pageUrl) {
 // Movie data now comes from cinestream.info (see ./cinestream + updateWiflixCache).
 // flemmix is still scraped for TV below.
 
-async function fetchWiflixTvData(tmdbId, season, cachedData = null) {
+function fetchWiflixTvData(tmdbId, season, cachedData = null) {
+  return withRefreshDiagnostics({ source: 'Wiflix/Flemmix', type: 'tv', id: tmdbId, season,
+    cachePresent: Boolean(cachedData) }, redis, () => loadWiflixTvData(tmdbId, season, cachedData));
+}
+
+async function loadWiflixTvData(tmdbId, season, cachedData) {
   try {
-    const [tmdbData, seasonData] = await Promise.all([
-      fetchTmdbDetails(TMDB_API_URL, TMDB_API_KEY, tmdbId, "tv", "fr-FR"),
-      fetchTmdbSeason(TMDB_API_URL, TMDB_API_KEY, tmdbId, season, "fr-FR"),
+    const [tmdbData, english, seasonData] = await Promise.all([
+      fetchTmdbDetails(TMDB_API_URL, TMDB_API_KEY, tmdbId, 'tv', 'fr-FR'),
+      fetchTmdbDetails(TMDB_API_URL, TMDB_API_KEY, tmdbId, 'tv', 'en-US'),
+      fetchTmdbSeason(TMDB_API_URL, TMDB_API_KEY, tmdbId, season, 'fr-FR'),
     ]);
-    const originalData = tmdbData;
-
-    if (!tmdbData || !seasonData) {
-      if (cachedData) return cachedData;
-      return {
-        success: false,
-        error: "Serie ou saison non trouvee sur TMDB",
-        tmdb_id: tmdbId,
-        season,
-      };
-    }
-
-    const titlesToTry = [
-      tmdbData.name,
-      originalData.original_name,
-      originalData.name,
-    ]
-      .filter(Boolean)
-      .filter((title, index, arr) => arr.indexOf(title) === index);
-
-    let seriesUrl = null;
-    let searchDebugHtml = null;
-    for (const title of titlesToTry) {
-      const searchResult = await searchWiflixMovie(`${title} saison ${season}`);
-      if (searchResult.url) { seriesUrl = searchResult.url; break; }
-      searchDebugHtml = searchResult.debugHtml;
-    }
-
-    if (!seriesUrl)
-      return {
-        success: false,
-        error: "Serie non trouvee sur Wiflix",
-        tmdb_id: tmdbId,
-        season,
-        titles_tried: titlesToTry,
-        debugHtml: searchDebugHtml,
-      };
-
-    const extractionResult = await extractWiflixPlayers(seriesUrl);
-    const players = extractionResult.players;
-    const wiflixReleaseYear = extractionResult.releaseYear;
-
-    if (players.length === 0)
-      return {
-        success: false,
-        error: "Aucun lecteur video trouve",
-        tmdb_id: tmdbId,
-        season,
-        wiflix_url: seriesUrl,
-        debugHtml: extractionResult.debugHtml,
-      };
-
-    if (wiflixReleaseYear) {
-      const tmdbReleaseYear = seasonData.air_date
-        ? new Date(seasonData.air_date).getFullYear()
-        : null;
-      if (tmdbReleaseYear && wiflixReleaseYear !== tmdbReleaseYear) {
-        console.log(
-          `[WIFLIX TV] Date mismatch: TMDB Season ${season} (${tmdbReleaseYear}) vs Wiflix ${wiflixReleaseYear} pour ${tmdbData.name}`,
-        );
-        return {
-          success: false,
-          error: "Serie non disponible sur Wiflix (date de sortie differente)",
-          tmdb_id: tmdbId,
-          season,
-          wiflix_url: seriesUrl,
-          tmdb_release_year: tmdbReleaseYear,
-          wiflix_release_year: wiflixReleaseYear,
-        };
+    if (!tmdbData || !seasonData) throw new Error('Métadonnées TMDB de la série ou de la saison indisponibles');
+    refreshStep('tmdb_result', { title: tmdbData.name, originalTitle: tmdbData.original_name });
+    const verifier = createIdentityVerifier({ apiUrl: TMDB_API_URL, apiKey: TMDB_API_KEY,
+      type: 'tv', details: tmdbData, english, seasonData });
+    const triedQueries = new Set(), triedUrls = new Set();
+    let searchDebugHtml = null, unavailable = false;
+    for (let pass = 0; pass < 2; pass++) {
+      const titles = pass ? await verifier.aliases() : verifier.titles;
+      for (const title of searchTitles(titles)) {
+        if (triedQueries.has(title) || triedQueries.size >= 8 || triedUrls.size >= 8) continue;
+        triedQueries.add(title);
+        const search = await searchWiflixMovie(`${title} saison ${season}`);
+        unavailable ||= search.unavailable === true;
+        searchDebugHtml = search.debugHtml || searchDebugHtml;
+        for (const candidate of search.candidates || []) {
+          if (triedUrls.has(candidate.url) || triedUrls.size >= 8) continue;
+          triedUrls.add(candidate.url);
+          const extraction = await extractWiflixPlayers(candidate.url);
+          if (!extraction.identity) {
+            unavailable = true;
+            refreshStep('candidate_fetch_failed', { url: candidate.url });
+            continue;
+          }
+          const identity = await verifier.verify(extraction.identity, { season });
+          refreshStep('candidate_identity', { url: candidate.url, title: candidate.title, ...identity });
+          if (!identity.accepted || !extraction.players.length) continue;
+          const episodes = {};
+          for (const player of extraction.players) {
+            const number = player.episode;
+            episodes[number] ||= { vf: [], vostfr: [] };
+            episodes[number][player.type === 'VOSTFR' ? 'vostfr' : 'vf'].push(player);
+          }
+          return { success: true, tmdb_id: tmdbId, title: tmdbData.name,
+            original_title: tmdbData.original_name, season: Number(season),
+            wiflix_url: candidate.url, episodes, identity: { ...identity, tmdbId: tmdbData.id },
+            cache_timestamp: new Date().toISOString() };
+        }
       }
     }
-
-    const episodes = {};
-    players.forEach((player) => {
-      const episodeNum = player.episode;
-      if (!episodes[episodeNum]) episodes[episodeNum] = { vf: [], vostfr: [] };
-      if (player.type === "VOSTFR") episodes[episodeNum].vostfr.push(player);
-      else episodes[episodeNum].vf.push(player);
+    if (unavailable) throw new Error('Recherche ou fiche Wiflix temporairement indisponible');
+    reportRefreshFailure('content_not_found', 'Aucune fiche avec lecteurs et identité confirmée après examen des candidats', {
+      title: tmdbData.name, candidatesChecked: triedUrls.size, queries: [...triedQueries],
     });
-
-    return {
-      success: true,
-      tmdb_id: tmdbId,
-      title: tmdbData.name,
-      original_title: originalData.original_name,
-      season: parseInt(season),
-      wiflix_url: seriesUrl,
-      episodes,
-      cache_timestamp: new Date().toISOString(),
-    };
+    return { success: false, error: 'Série non trouvée ou identité non confirmée sur Wiflix',
+      tmdb_id: tmdbId, season, titles_tried: [...triedQueries], debugHtml: searchDebugHtml };
   } catch (error) {
-    console.error(`[WIFLIX TV] Erreur: ${error.message}`);
-    if (cachedData) {
-      console.log(
-        `[WIFLIX] Cache preserve malgre l'erreur pour tv ${tmdbId} saison ${season}`,
-      );
-      return cachedData;
-    }
-    return {
-      success: false,
-      error: "Erreur lors de la recuperation des donnees Wiflix",
-      message: error.message,
-      tmdb_id: tmdbId,
-      season,
-    };
+    reportRefreshFailure('refresh_exception', error);
+    if (cachedData) return cachedData;
+    return { success: false, error: 'Wiflix temporairement indisponible', tmdb_id: tmdbId, season };
   }
 }
 
 // === Background Cache Update ===
-const WIFLIX_UPDATE_LOCK_TTL = 60; // 60s max per scrape — auto-expires if worker crashes
+const WIFLIX_UPDATE_LOCK_TTL = 60; // Renouvelé pendant l'examen des candidats.
 
 const updateWiflixCache = async (
   cacheDir,
@@ -613,6 +539,14 @@ const updateWiflixCache = async (
     retries: 0, // Don't wait — if another worker is already on it, skip
   });
   if (!lock) return; // Another worker (or this one) is already updating this key
+  let leaseLost = false, renewing = false;
+  const renewal = setInterval(async () => {
+    if (renewing || leaseLost) return;
+    renewing = true;
+    try { if (!await lock.renew()) leaseLost = true; }
+    finally { renewing = false; }
+  }, 20000);
+  renewal.unref();
 
   try {
     // Une autre actualisation peut s'être terminée depuis la réponse au visiteur.
@@ -639,6 +573,12 @@ const updateWiflixCache = async (
       throw new Error("Donnees invalides - non-JSON");
 
     if (newData) {
+      if (leaseLost || !await lock.renew()) {
+        reportRefreshFailure('refresh_lock_lost', 'Publication abandonnée : bail d’actualisation perdu', {
+          source: 'Wiflix/Flemmix', type, id: tmdbId, season,
+        }, redis);
+        return;
+      }
       const isFailedResult = newData.success === false;
       // Les extracteurs peuvent également retourner l'ancien objet sur panne.
       if (isFailedResult || newData === existingCache) {
@@ -661,6 +601,7 @@ const updateWiflixCache = async (
       console.error(`[WIFLIX UPDATE] Délai de reprise non enregistré: ${retryError.message}`);
     });
   } finally {
+    clearInterval(renewal);
     await lock.release();
   }
 };
@@ -717,6 +658,9 @@ router.get("/movie/:tmdbId", async (req, res) => {
 // GET /tv/:tmdbId/:season
 router.get("/tv/:tmdbId/:season", async (req, res) => {
   const { tmdbId, season } = req.params;
+  if (!/^[1-9]\d*$/.test(tmdbId) || !/^\d+$/.test(season)) {
+    return res.status(400).json({ success: false, error: 'Identifiant TMDB ou saison invalide' });
+  }
   const cacheKey = generateCacheKey(`wiflix_tv_${tmdbId}_${season}`);
   const cacheDir = path.join(__dirname, "..", "cache", "wiflix");
 

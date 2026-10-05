@@ -14,9 +14,10 @@ import MarkdownToolbar from './MarkdownToolbar';
 import { useTurnstileBypass } from '../hooks/useTurnstileBypass';
 import { ADMIN_BYPASS_TOKEN } from '../utils/turnstileBypass';
 import { getOverlayPortalRoot } from '@/utils/overlayPortal';
+import { Skeleton } from './ui/Skeleton';
+import { TURNSTILE_SITE_KEY } from '../utils/turnstileKeys';
 
 const MAIN_API = import.meta.env.VITE_MAIN_API;
-const TURNSTILE_SITE_KEY = import.meta.env.VITE_TURNSTILE_SITE_KEY;
 
 const mdComponents = {
   p: ({ children }: any) => <p className="mb-1 last:mb-0">{children}</p>,
@@ -99,29 +100,28 @@ const SpoilerToggle: React.FC<SpoilerToggleProps> = ({ checked, onChange, size =
 // Composant Skeleton pour les commentaires
 const CommentSkeleton: React.FC = () => {
   return (
-    <div className="bg-gray-800/70 rounded-xl p-3 sm:p-4 md:p-6 animate-pulse">
+    <div className="bg-gray-800/70 rounded-xl p-3 sm:p-4 md:p-6 relative overflow-hidden" aria-hidden="true">
       <div className="flex items-start gap-2 sm:gap-3 md:gap-4">
         <div className="flex-shrink-0">
-          <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-full bg-gray-700"></div>
+          <div className="w-8 h-8 sm:w-10 sm:h-10"><Skeleton variant="circle" height="100%" baseColor="#374151" /></div>
         </div>
-        <div className="flex-1 space-y-2 sm:space-y-3">
+        <div className="flex-1 min-w-0">
           {/* En-tête */}
           <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
-            <div className="h-3 sm:h-4 w-20 sm:w-24 bg-gray-700 rounded"></div>
-            <div className="h-3 sm:h-4 w-12 sm:w-16 bg-gray-700 rounded"></div>
-            <div className="h-2.5 sm:h-3 w-16 sm:w-20 bg-gray-700 rounded"></div>
+            <div className="w-20 sm:w-24"><Skeleton className="h-5 sm:h-6" baseColor="#374151" /></div>
+            <Skeleton width={64} className="h-[15px] sm:h-4" baseColor="#374151" />
           </div>
           {/* Contenu */}
-          <div className="space-y-2">
-            <div className="h-3 sm:h-4 w-full bg-gray-700 rounded"></div>
-            <div className="h-3 sm:h-4 w-5/6 bg-gray-700 rounded"></div>
-            <div className="h-3 sm:h-4 w-4/6 bg-gray-700 rounded"></div>
+          <div className="mt-2">
+            {[100, 85, 65].map(width => (
+              <div key={width} className="h-5 sm:h-6 flex items-center">
+                <Skeleton width={`${width}%`} className="h-3.5 sm:h-4" containerClassName="w-full" baseColor="#374151" />
+              </div>
+            ))}
           </div>
           {/* Actions */}
-          <div className="flex items-center gap-2 sm:gap-4 mt-3 sm:mt-4">
-            <div className="h-3 sm:h-4 w-10 sm:w-12 bg-gray-700 rounded"></div>
-            <div className="h-3 sm:h-4 w-10 sm:w-12 bg-gray-700 rounded"></div>
-            <div className="h-3 sm:h-4 w-12 sm:w-16 bg-gray-700 rounded"></div>
+          <div className="flex items-center gap-2 sm:gap-3 md:gap-4 mt-3 sm:mt-4 flex-wrap">
+            {[32, 32, 64].map((width, index) => <Skeleton key={index} width={width} className="h-4 sm:h-5" baseColor="#374151" />)}
           </div>
         </div>
       </div>
@@ -500,7 +500,7 @@ const CommentItem = React.memo<CommentItemProps>((props) => {
             )}
             {reportedIds.has(`comment-${comment.id}`) && (
               <span className="text-xs sm:text-sm text-orange-400/60 flex items-center gap-1">
-                <Flag className="w-3 h-3" />
+                <Flag className="w-3 h-3 text-orange-400 opacity-60" />
                 <span className="hidden sm:inline">{t('comments.reported', 'Signalé')}</span>
               </span>
             )}
@@ -813,7 +813,7 @@ const CommentItem = React.memo<CommentItemProps>((props) => {
                             )}
                             {reportedIds.has(`reply-${reply.id}`) && (
                               <span className="text-[10px] sm:text-xs text-orange-400/60 flex items-center gap-1">
-                                <Flag className="w-2.5 h-2.5 sm:w-3 sm:h-3" />
+                                <Flag className="w-2.5 h-2.5 sm:w-3 sm:h-3 text-orange-400 opacity-60" />
                                 <span className="hidden sm:inline">{t('comments.reported', 'Signalé')}</span>
                               </span>
                             )}

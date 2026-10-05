@@ -66,11 +66,12 @@ import {
 import { getOverlayPortalRoot } from '@/utils/overlayPortal';
 import { useTurnstileBypass } from '@/hooks/useTurnstileBypass';
 import { ADMIN_BYPASS_TOKEN } from '@/utils/turnstileBypass';
+import { TURNSTILE_SITE_KEY } from '@/utils/turnstileKeys';
+import { copyText } from '@/utils/clipboard';
 
 // Get API URL from environment variable
 const API_URL = import.meta.env.VITE_MAIN_API;
 const TMDB_API_KEY = import.meta.env.VITE_TMDB_API_KEY || '';
-const TURNSTILE_SITE_KEY = import.meta.env.VITE_TURNSTILE_SITE_KEY;
 const TMDB_POSTER_BASE_URL = 'https://image.tmdb.org/t/p/w500';
 const LIVE_TV_FAVORITES_STORAGE_KEY = 'live_tv_favorite_channels';
 const LIVE_TV_IPTV_CATEGORY_FAVORITES_STORAGE_KEY = 'live_tv_favorite_iptv_categories';
@@ -2056,7 +2057,27 @@ const Profile: React.FC = () => {
 
       const savedLists = localStorage.getItem('custom_lists');
       if (savedLists) {
-        const lists = JSON.parse(savedLists);
+        let lists: CustomList[] = [];
+        try {
+          const parsed: unknown = JSON.parse(savedLists);
+          if (Array.isArray(parsed)) {
+            lists = parsed.filter((list): list is CustomList =>
+              list != null && typeof list === 'object' &&
+              (typeof list.id === 'number' || typeof list.id === 'string') &&
+              Number.isFinite(Number(list.id)) && typeof list.name === 'string'
+            ).map((list) => ({
+              ...list,
+              // AddToListMenu crée des identifiants Date.now() en chaîne.
+              id: Number(list.id),
+              items: Array.isArray(list.items) ? list.items.filter((item) =>
+                item != null && typeof item === 'object' &&
+                typeof item.id === 'number' && ['movie', 'tv', 'collection'].includes(item.type)
+              ) : [],
+            }));
+          }
+        } catch {
+          // Le contenu invalide reste stocké : aucune liste n'est écrasée ici.
+        }
 
         // Enrichir les listes avec le nombre de films des collections
         const enrichedLists = await Promise.all(lists.map(async (list: CustomList) => {
@@ -2437,8 +2458,9 @@ const Profile: React.FC = () => {
   const copyPremiumKey = () => {
     const accessCode = localStorage.getItem('access_code');
     if (accessCode) {
-      navigator.clipboard.writeText(accessCode);
-      console.log('Clé copiée dans le presse-papiers');
+      void copyText(accessCode).then((copied) => {
+        if (copied) console.log('Clé copiée dans le presse-papiers');
+      });
     }
   };
 
@@ -3746,8 +3768,11 @@ const Profile: React.FC = () => {
 
         // Copier le lien automatiquement
         const shareUrl = `${window.location.origin}/list/${shareCode}`;
-        await navigator.clipboard.writeText(shareUrl);
-        toast.success(t('profilePage.sharing.copied'));
+        if (await copyText(shareUrl)) {
+          toast.success(t('profilePage.sharing.copied'));
+        } else {
+          console.error('Erreur partage liste: copie du lien impossible');
+        }
       }
     } catch (err) {
       console.error('Erreur partage liste:', err);
@@ -3783,8 +3808,9 @@ const Profile: React.FC = () => {
 
   const handleCopyShareLink = async (shareCode: string) => {
     const shareUrl = `${window.location.origin}/list/${shareCode}`;
-    await navigator.clipboard.writeText(shareUrl);
-    toast.success(t('profilePage.sharing.copied'));
+    if (await copyText(shareUrl)) {
+      toast.success(t('profilePage.sharing.copied'));
+    }
   };
 
   // Render empty state message for different sections
@@ -4809,7 +4835,7 @@ const Profile: React.FC = () => {
                             <span className="font-mono text-sm text-white break-all">{accountIdInfo?.id || ''}</span>
                             <button
                               className="flex items-center gap-1 text-xs px-2 py-1 rounded-md bg-gray-700 hover:bg-gray-600 text-white transition-colors"
-                              onClick={() => { if (accountIdInfo?.id) navigator.clipboard.writeText(accountIdInfo.id); }}
+                              onClick={() => { if (accountIdInfo?.id) void copyText(accountIdInfo.id); }}
                             >
                               <Copy className="w-3.5 h-3.5" />
                               {t('profilePage.accountPopup.copy')}
@@ -4880,7 +4906,7 @@ const Profile: React.FC = () => {
                             <div className="text-xs text-gray-400">{t('profilePage.localStoragePopup.jsonLabel')}</div>
                             <button
                               className="flex items-center gap-1 text-xs px-2 py-1 rounded-md bg-gray-700 hover:bg-gray-600 text-white transition-colors"
-                              onClick={() => { if (localStorageData) navigator.clipboard.writeText(localStorageData); }}
+                              onClick={() => { if (localStorageData) void copyText(localStorageData); }}
                             >
                               <Copy className="w-3.5 h-3.5" />
                               {t('profilePage.localStoragePopup.copyAll')}

@@ -198,8 +198,8 @@ const VipInvoicesPage: React.FC = () => {
       className="min-h-screen bg-black text-white"
     >
       <div className="container mx-auto px-4 py-8 sm:px-6 sm:py-12 relative z-10">
-        <Link to="/vip" className="inline-flex items-center text-white/50 hover:text-white transition-colors mb-8">
-          <ArrowLeft className="w-5 h-5 mr-2" />
+        <Link to="/vip" className="inline-flex items-center text-white/50 hover:text-white transition-colors mb-8 group/icon">
+          <ArrowLeft className="w-5 h-5 mr-2 text-white opacity-50 group-hover/icon:opacity-100 transition-[color,opacity]" />
           {t('vipDonations.invoice.backVip')}
         </Link>
 

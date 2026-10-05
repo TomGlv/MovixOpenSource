@@ -2,7 +2,7 @@ import type { TFunction } from 'i18next';
 
 import type { VipCoin, VipInvoiceStatus, VipPaymentMethod } from '../services/vipDonationsService';
 
-export const TURNSTILE_SITE_KEY = import.meta.env.VITE_TURNSTILE_SITE_KEY || '';
+export { TURNSTILE_SITE_KEY } from './turnstileKeys';
 export type VipDisplayedPaymentMethod = VipPaymentMethod;
 
 export function getVipDurationLabel(

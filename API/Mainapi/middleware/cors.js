@@ -79,6 +79,7 @@ const corsMiddleware = cors({
     "x-turnstile-token",
   ],
   credentials: true,
+  maxAge: 600,
   optionsSuccessStatus: 204,
 });
 

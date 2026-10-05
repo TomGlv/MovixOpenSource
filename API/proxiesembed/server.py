@@ -45,6 +45,7 @@ from dotenv import load_dotenv
 from uqload_utils import (
     decode_packed_script_from_html,
     extract_uqload_media_url,
+    extract_uqload_subtitles,
     get_uqload_site_origin,
     normalize_uqload_embed_url,
     parse_allowed_uqload_url,
@@ -4203,14 +4204,48 @@ class ProxyServer:
                 elif numeric_literal.match(body):
                     seed += sign * int(body, 0)
                 elif identifier.match(body):
-                    # The only non-numeric term these players use is the
-                    # hostname checksum computed just above the loop.
-                    if host_sum is None:
-                        host_sum = hostname_char_sum(mask)
-                    seed += sign * host_sum
+                    resolved = resolve_identifier(body)
+                    if resolved is None:
+                        if host_sum is None:
+                            host_sum = hostname_char_sum(mask)
+                        resolved = host_sum
+                    seed += sign * resolved
                 else:
                     return None
             return seed, step
+
+        css_px_per_unit = {
+            'px': 1.0, 'in': 96.0, 'cm': 96 / 2.54, 'mm': 96 / 25.4,
+            'pt': 96 / 72, 'pc': 16.0, 'q': 96 / 101.6,
+        }
+
+        def resolve_identifier(name: str) -> Optional[int]:
+            """Valeur d'une variable de la clé autre que la somme du hostname.
+
+            Le lecteur ajoute la largeur mesurée d'un div caché
+            (`width:1in` → offsetWidth = 96 px CSS) : on relit l'unité dans
+            la page pour suivre une rotation. Renvoie None pour la somme du
+            hostname, que l'appelant calcule.
+            """
+            token = re.escape(name)
+            measured = re.search(
+                rf'\b{token}\s*=\s*[A-Za-z_$][\w$]*\.(?:offset|client)(Width|Height)\b',
+                script,
+            )
+            if measured:
+                axis = 'width' if measured.group(1) == 'Width' else 'height'
+                css = re.search(
+                    rf'(?:^|[;"\'\s]){axis}\s*:\s*(\d+(?:\.\d+)?)\s*(px|in|cm|mm|pt|pc|q)\b',
+                    script[max(0, measured.start() - 600):measured.start()],
+                    re.IGNORECASE,
+                )
+                if css:
+                    return round(float(css.group(1)) * css_px_per_unit[css.group(2).lower()])
+                return 0
+            literal = re.search(rf'\b{token}\s*=\s*(0[xX][0-9a-fA-F]+|\d+)\s*[;,]', script)
+            if literal and not re.search(rf'\b{token}\s*=\s*\(?\s*{token}\s*\+', script):
+                return int(literal.group(1), 0)
+            return None
 
         for match in rolling_xor_pattern.finditer(script):
             try:
@@ -4670,6 +4705,11 @@ class ProxyServer:
     
     async def _extract_uqload_media_url(self, embed_url: str) -> str:
         """Extract an HLS or MP4 URL from a UQLOAD embed without executing it."""
+        media_url, _subtitles = await self._extract_uqload_media(embed_url)
+        return media_url
+
+    async def _extract_uqload_media(self, embed_url: str) -> Tuple[str, list]:
+        """URL média et sous-titres d'un embed UQLOAD, sans exécuter la page."""
         validated = self._validate_uqload_url(embed_url)
         site_origin = get_uqload_site_origin(validated)
         urls = [validated, validated.replace('/embed-', '/')]
@@ -4682,6 +4722,7 @@ class ProxyServer:
         }
         
         html = None
+        page_url = validated
         for url in urls:
             try:
                 # UQLOAD generic fetch -> normal session
@@ -4689,21 +4730,24 @@ class ProxyServer:
                                            timeout=ClientTimeout(total=5)) as resp:
                     if resp.status == 200:
                         html = await resp.text()
+                        page_url = url
                         break
             except (aiohttp.ClientError, asyncio.TimeoutError):
                 continue
-        
+
         if not html:
             raise ValueError('No content from UQLOAD')
-        
+
         if 'File was deleted' in html:
             raise ValueError('Video deleted')
-        
+
         media_url = extract_uqload_media_url(html)
         if not media_url:
             raise ValueError('Uqload media URL not found')
-        
-        return media_url
+
+        # Les fichiers VTT d'Uqload sont servis avec `Access-Control-Allow-Origin: *` :
+        # le lecteur peut les charger en direct, sans passer par le proxy.
+        return media_url, extract_uqload_subtitles(html, page_url)
     
     async def uqload_extract_handler(self, request: Request) -> Response:
         """UQLOAD extraction"""
@@ -4725,15 +4769,17 @@ class ProxyServer:
                 return resp
             
             validated = self._validate_uqload_url(url)
-            media_url = await self._extract_uqload_media_url(validated)
-            
+            media_url, subtitles = await self._extract_uqload_media(validated)
+
             if not media_url:
                 return web.json_response({'error': 'Extraction failed'}, status=404)
-            
+
             result = {
                 'url': _signed_service_url('/uqload-proxy', media_url),
                 'source': 'uqload'
             }
+            if subtitles:
+                result['subtitles'] = subtitles
             
             self.uqload_cache.set(cache_key, result)
             resp = web.json_response(result)

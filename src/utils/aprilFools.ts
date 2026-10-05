@@ -1,3 +1,5 @@
+import { readSessionStorage } from './browserStorage';
+
 const APRIL_FOOLS_TIMEZONE = 'Europe/Paris';
 const APRIL_FOOLS_PREVIEW_QUERY = 'apriladmin';
 const APRIL_FOOLS_PREVIEW_STORAGE_KEY = 'movix_april_admin_preview';
@@ -32,16 +34,16 @@ const readPreviewFlag = (search: string) => {
   const previewValue = params.get(APRIL_FOOLS_PREVIEW_QUERY);
 
   if (previewValue === '1') {
-    sessionStorage.setItem(APRIL_FOOLS_PREVIEW_STORAGE_KEY, 'true');
+    try { sessionStorage.setItem(APRIL_FOOLS_PREVIEW_STORAGE_KEY, 'true'); } catch { /* Prévisualisation limitée à cette URL. */ }
     return true;
   }
 
   if (previewValue === '0') {
-    sessionStorage.removeItem(APRIL_FOOLS_PREVIEW_STORAGE_KEY);
+    try { sessionStorage.removeItem(APRIL_FOOLS_PREVIEW_STORAGE_KEY); } catch { /* Le paramètre reste prioritaire. */ }
     return false;
   }
 
-  return sessionStorage.getItem(APRIL_FOOLS_PREVIEW_STORAGE_KEY) === 'true';
+  return readSessionStorage(APRIL_FOOLS_PREVIEW_STORAGE_KEY) === 'true';
 };
 
 export const isAprilFoolsAdminEnabled = (search = '') => {

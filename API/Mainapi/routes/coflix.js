@@ -9,6 +9,9 @@ const cheerio = require("cheerio");
 const { Buffer } = require("buffer");
 
 const { CACHE_DIR, generateCacheKey } = require("../utils/cacheManager");
+const { redis } = require('../config/redis');
+const { createSharedSourceLookup } = require('../utils/sharedSourceWork');
+const coflixSearchCache = createSharedSourceLookup({ redis, namespace: 'coflix:search:v2', ttlMs: 30 * 60000 });
 
 // ---- Lazy-bound dependencies injected via configure() ----
 let deps = {
@@ -133,6 +136,13 @@ function coflixPostTypeFromUrl(url) {
 // WordPress /?s=<query> et sa grille .md-manga-card.
 async function searchCoflixByTitle(title, mediaType, releaseYear) {
   if (!COFLIX_ENABLED) return [];
+  return coflixSearchCache.load([deps.COFLIX_BASE_URL, title, mediaType, releaseYear],
+    () => searchCoflixUncached(title, mediaType, releaseYear),
+    { cacheable: results => Array.isArray(results) && results.length > 0 });
+}
+
+async function searchCoflixUncached(title, mediaType, releaseYear) {
+  if (!COFLIX_ENABLED) return [];
   try {
     const normalizedTitle = normalizeCoflixQuery(title);
 
@@ -170,11 +180,20 @@ async function searchCoflixByTitle(title, mediaType, releaseYear) {
       const yearText = $card.find(".md-card-badge.year").first().text().trim();
       const resultYear = yearText ? parseInt(yearText, 10) : null;
 
+      // Affiche TMDB de la carte (ex. //image.tmdb.org/t/p/w342/abc.jpg) :
+      // seul indice d'identite pour les series, qui n'ont pas de badge annee.
+      const posterSrc =
+        $card.find("img").first().attr("data-src") ||
+        $card.find("img").first().attr("src") ||
+        "";
+      const posterMatch = posterSrc.match(/tmdb\.org\/t\/p\/[^/]+(\/[^/?#]+)/i);
+
       results.push({
         title: cardTitle,
         url: href,
         similarity: calculateTitleSimilarity(title, cardTitle),
         year: Number.isNaN(resultYear) ? null : resultYear,
+        poster: posterMatch ? posterMatch[1] : null,
         id: null,
         excerpt: "",
         post_type: postType,
