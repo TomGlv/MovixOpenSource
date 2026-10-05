@@ -545,6 +545,7 @@ async function setupRules() {
           "movix.show",
           "movix.men",
           "movix.college",
+          "movix.luxe",
         ],
         resourceTypes: [
           "xmlhttprequest",
